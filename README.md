@@ -1,4 +1,5 @@
-Advanced Arabic Retrieval-Augmented Generation (RAG) system for document-grounded question answering.
+AR-RAG
+Advanced Arabic Retrieval-Augmented Generation (RAG) system for document-grounded question answering. Ar-RAG: Advanced Arabic Retrieval-Augmented Generation System
 
 Ar-RAG is a production-oriented Arabic Retrieval-Augmented Generation (RAG) system designed to enable accurate, context-aware Arabic question answering over private document collections. The system focuses on Arabic-specific challenges such as normalization, morphology, and semantic retrieval, while following enterprise-ready architecture practices.
 
