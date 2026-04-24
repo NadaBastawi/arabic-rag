@@ -1,126 +1,141 @@
-AR-RAG
-Advanced Arabic Retrieval-Augmented Generation (RAG) system for document-grounded question answering. Ar-RAG: Advanced Arabic Retrieval-Augmented Generation System
+# Arabic RAG (Production Starter)
 
-Ar-RAG is a production-oriented Arabic Retrieval-Augmented Generation (RAG) system designed to enable accurate, context-aware Arabic question answering over private document collections. The system focuses on Arabic-specific challenges such as normalization, morphology, and semantic retrieval, while following enterprise-ready architecture practices.
+Arabic RAG system with:
+- FastAPI backend (`app/main.py`)
+- Gradio chatbot UI (`app/app.py`)
+- FAISS/NumPy vector store (`app/services/faiss_store.py`)
+- Multi-stage Arabic retrieval and reranking
 
-🔍 Problem Statement
+This README is the single source of truth for setup and usage.
 
-Most existing RAG systems are optimized for English and perform poorly when applied to Arabic content due to:
+## 1) Quick Start (Local)
 
-Inconsistent letter forms and diacritics
+### Prerequisites
+- Python 3.10+ (3.11 recommended)
+- `pip`
+- Optional GPU (CPU works)
 
-Weak Arabic embeddings
+### Install
+```bash
+python -m venv .venv
+.venv\Scripts\activate   # Windows
+pip install -r requirements.txt
+```
 
-Hallucinated responses without grounded sources
+### Configure
+Create `.env` (or copy `.env.example`) and set at least:
+```env
+LLM_MODEL=gemini-2.0-flash
+LLM_API_KEY=your_real_key_here
+EMBEDDING_MODEL=intfloat/multilingual-e5-large
+RETRIEVAL_MODE=multi_stage
+```
 
-Lack of production-ready structure
+### Run API
+```bash
+python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+```
+Open:
+- API docs: `http://localhost:8000/docs`
+- Health: `http://localhost:8000/health`
 
-Ar-RAG addresses these gaps by combining Arabic-aware preprocessing, semantic retrieval, and controlled LLM generation grounded strictly in uploaded documents.
+### Run Chat UI
+In another terminal:
+```bash
+python -m gradio app.app
+```
+Default UI port: `7860`
 
-🚀 Key Features
+## 2) Quick Start (Docker)
 
-Arabic-aware text preprocessing
+```bash
+docker compose up --build
+```
 
-Letter normalization (أ, إ, آ → ا, etc.)
+Open:
+- API: `http://localhost:8000`
+- UI: `http://localhost:7860`
 
-Diacritics and elongation removal
+## 3) Minimal Test Commands
 
-Document-based question answering
+Run tests:
+```bash
+python -m pytest -q
+```
 
-Answers are generated only from retrieved content
+If OneDrive blocks `.pyc` writes:
+```bash
+set PYTHONDONTWRITEBYTECODE=1
+python -m pytest -q
+```
 
-Modular RAG pipeline
+## 4) API Endpoints You Will Use Most
 
-Embedding service
+- `POST /index` add raw text documents
+- `POST /query` ask question + get answer + retrieved docs
+- `POST /documents/upload` upload `pdf/txt`
+- `GET /documents` list indexed documents
+- `DELETE /documents/{document_id}` delete one document
+- `POST /documents/clear` clear all
+- `GET /stats` index/cache stats
 
-Vector retrieval layer
+## 5) Project Structure (Keep This)
 
-LLM orchestration layer
+```text
+app/
+  main.py                    # FastAPI app (production API)
+  app.py                     # Gradio chatbot UI
+  config.py                  # env-based config
+  services/
+    embedding_service.py
+    llm_service.py
+    rag_pipeline.py
+    faiss_store.py
+    multi_stage_retrieval.py
+    cache.py
+  utils/
+    document_loader.py
+    arabic_morphology.py
+    arabic_preprocessing.py
+    errors.py
+    logging_config.py
+tests/
+  test_rag_pipeline.py
+  test_integration.py
+requirements.txt
+Dockerfile
+docker-compose.yml
+.env.example
+README.md
+```
 
-Production-ready backend structure
+## 6) Optional Utilities (Can Keep or Remove)
 
-Clear separation of concerns
+- `app/build_index.py` (offline indexing utility)
+- `app/eval.py` (retrieval evaluation utility)
 
-Extensible services architecture
+If your team does not use them, delete both to simplify the repo.
 
-Interactive web UI
+## 7) Common Production Notes
 
-Upload Arabic PDFs / text documents
+- `EmbeddingService` includes fallback embeddings for offline/dev environments.
+- `FAISSVectorStore` can fall back to NumPy backend if FAISS is unavailable.
+- Keep `INDEX_PATH` on persistent storage in production.
+- Never commit real API keys.
 
-Ask questions in Arabic
+## 8) Next Steps to Make It a Real Testable Chatbot Product
 
-View grounded answers with contextual coherence
+1. Create a stable test dataset of real Arabic documents (50-200 docs).
+2. Add source citation in final answer text (document id + chunk snippet).
+3. Add authentication to API (`/query`, `/documents/*`).
+4. Add conversation memory (session id + message history store).
+5. Add observability (request logs, latency, token usage, retrieval scores).
+6. Run load test (concurrent users) and define SLAs.
+7. Package one-click launch (Docker + `.env` template + sample docs).
+8. Add human evaluation loop for answer quality before release.
 
-🧠 System Architecture
+## 9) Troubleshooting
 
-Document Ingestion
-
-Arabic documents are uploaded via the UI
-
-Text is extracted and normalized
-
-Embedding & Indexing
-
-Arabic text is converted into semantic embeddings
-
-Stored in a vector store for fast retrieval
-
-Retrieval
-
-Relevant document chunks are retrieved based on semantic similarity
-
-Generation
-
-Retrieved context is passed to the LLM
-
-Answers are generated with strict grounding to the source data
-
-🖥️ User Interface
-
-The system provides a simple, chat-style interface where users can:
-
-Upload Arabic documents (PDF, TXT)
-
-Ask natural language questions in Arabic
-
-Receive structured, context-aware answers
-
-This UI is designed to demonstrate real enterprise usage, not just a demo chatbot.
-
-🏗️ Tech Stack
-
-Backend: Python
-
-Architecture: Modular RAG pipeline
-
-Vector Retrieval: Pluggable (FAISS / alternatives)
-
-LLM Integration: API-based (configurable)
-
-Frontend: Web-based chat interface (Google AI Studio UI for demo)
-
-Language Focus: Arabic (Modern Standard Arabic)
-
-🎯 Use Cases
-
-Arabic document analysis
-
-Knowledge assistants for Arabic content
-
-Enterprise internal search systems
-
-Research and educational platforms
-
-Legal / policy document QA in Arabic
-
-📌 Project Goal
-
-This project was built to demonstrate production-level AI system design, focusing on:
-
-Clean architecture
-
-Real-world constraints
-
-Arabic language specialization
-
-End-to-end RAG workflows
+- Model download blocked/network issue: fallback embeddings are used automatically.
+- Missing `fastapi` or `gradio`: reinstall with `pip install -r requirements.txt`.
+- OneDrive permission errors on `__pycache__`: use `PYTHONDONTWRITEBYTECODE=1` while testing.

@@ -62,6 +62,10 @@ class SimpleVectorStore:
             self.embeddings = embeddings.copy()
         else:
             self.embeddings = np.vstack([self.embeddings, embeddings])
+
+    def add_documents(self, texts: List[str], embeddings: np.ndarray) -> None:
+        """Compatibility alias used by other modules."""
+        self.add(texts=texts, embeddings=embeddings)
     
     def search(
         self,
@@ -115,6 +119,14 @@ class SimpleVectorStore:
                 'text': self.texts[idx],
                 'score': float(similarities[idx])
             })
-        
+
         return results
+
+    def get_stats(self) -> dict:
+        """Basic store statistics."""
+        return {
+            "total_documents": len(self.texts),
+            "index_type": "InMemory",
+            "embedding_dim": int(self.embeddings.shape[1]) if self.embeddings is not None else None,
+        }
 

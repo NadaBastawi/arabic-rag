@@ -1,120 +1,97 @@
-"""
-Minimal tests for the RAG pipeline.
+"""Unit tests for the RAG pipeline."""
 
-Tests document addition, context retrieval, and answer generation.
-"""
+import hashlib
+from typing import List, Union
 
-from app.services.embedding_service import EmbeddingService
-from app.services.llm_service import LLMService
-from app.services.vector_store import SimpleVectorStore
+import numpy as np
+import pytest
+
 from app.services.rag_pipeline import RAGPipeline
+from app.services.vector_store import SimpleVectorStore
+
+
+class MockEmbeddingService:
+    """Deterministic local embedding service for tests."""
+
+    def __init__(self, dim: int = 32):
+        self.dim = dim
+
+    def _embed_one(self, text: str) -> np.ndarray:
+        vector = np.zeros(self.dim, dtype=np.float32)
+        tokens = text.split() or [text]
+        for token in tokens:
+            idx = int(hashlib.md5(token.encode("utf-8")).hexdigest(), 16) % self.dim
+            vector[idx] += 1.0
+        norm = np.linalg.norm(vector)
+        return vector / norm if norm else vector
+
+    def embed(self, texts: Union[str, List[str]]) -> np.ndarray:
+        if isinstance(texts, str):
+            return self._embed_one(texts)
+        return np.vstack([self._embed_one(text) for text in texts])
 
 
 class MockLLMService:
-    """Mock LLM service that returns a simple response."""
-    
     def generate(self, prompt: str) -> str:
-        """Return a mock answer."""
-        return "هذه إجابة تجريبية من النموذج اللغوي."
+        assert "??????:" in prompt
+        return "????? ???????"
 
 
-def test_documents_can_be_added():
-    """Test that documents can be added to the vector store."""
+def test_documents_can_be_added_and_searched():
     vector_store = SimpleVectorStore()
-    embedding_service = EmbeddingService()
-    
-    # Sample documents
+    embedding_service = MockEmbeddingService()
+
     documents = [
-        "الذكاء الاصطناعي هو فرع من فروع علوم الحاسوب.",
-        "التعلم الآلي يستخدم خوارزميات لتحليل البيانات."
+        "?????? ????????? ?? ??? ?? ???? ???????",
+        "?????? ????? ????? ??? ????????"
     ]
-    
-    # Embed and add documents
+
     embeddings = embedding_service.embed(documents)
-    vector_store.add(documents, embeddings)
-    
-    # Assert documents were added
+    vector_store.add_documents(documents, embeddings)
+
+    results = vector_store.search(embedding_service.embed("?????? ?????????"), top_k=1)
+
     assert len(vector_store.texts) == 2
     assert vector_store.embeddings is not None
-    assert vector_store.embeddings.shape[0] == 2
+    assert len(results) == 1
+    assert "text" in results[0]
 
 
-def test_query_returns_non_empty_context():
-    """Test that a query returns non-empty context from the vector store."""
-    vector_store = SimpleVectorStore()
-    embedding_service = EmbeddingService()
-    
-    # Add sample documents
-    documents = [
-        "الذكاء الاصطناعي هو فرع من فروع علوم الحاسوب يهدف إلى إنشاء أنظمة ذكية.",
-        "التعلم الآلي هو نوع من الذكاء الاصطناعي يتيح للأنظمة التعلم من البيانات.",
-        "معالجة اللغة الطبيعية تركز على التفاعل بين الحاسوب واللغة البشرية."
-    ]
-    
-    embeddings = embedding_service.embed(documents)
-    vector_store.add(documents, embeddings)
-    
-    # Query
-    question = "ما هو الذكاء الاصطناعي؟"
-    question_embedding = embedding_service.embed(question)
-    
-    # Search
-    results = vector_store.search(question_embedding, top_k=2)
-    
-    # Assert non-empty results
-    assert len(results) > 0
-    assert isinstance(results[0], dict)
-    assert 'text' in results[0]
-    assert len(results[0]['text']) > 0
-
-
-def test_pipeline_returns_string_answer():
-    """Test that the RAG pipeline returns a string answer."""
-    # Initialize services
-    embedding_service = EmbeddingService()
+def test_pipeline_returns_non_empty_answer():
+    embedding_service = MockEmbeddingService()
     llm_service = MockLLMService()
     vector_store = SimpleVectorStore()
-    
-    # Add documents
-    documents = [
-        "الذكاء الاصطناعي هو فرع من فروع علوم الحاسوب.",
-        "التعلم الآلي يستخدم خوارزميات لتحليل البيانات."
+
+    docs = [
+        "?????? ????????? ?????? ?? ????",
+        "?????? ?????? ??? ?? ?????? ?????",
     ]
-    
-    embeddings = embedding_service.embed(documents)
-    vector_store.add(documents, embeddings)
-    
-    # Initialize pipeline
+    vector_store.add_documents(docs, embedding_service.embed(docs))
+
     pipeline = RAGPipeline(
         embedding_service=embedding_service,
         llm_service=llm_service,
         vector_store=vector_store,
-        top_k=2
+        top_k=2,
+        retrieval_mode="basic",
     )
-    
-    # Get answer
-    question = "ما هو الذكاء الاصطناعي؟"
-    answer = pipeline.answer(question)
-    
-    # Assert answer is a non-empty string
+
+    answer = pipeline.answer("?? ?? ?????? ??????????")
+
     assert isinstance(answer, str)
-    assert len(answer) > 0
+    assert answer.strip() == "????? ???????"
 
 
-if __name__ == "__main__":
-    print("Running tests...")
-    
-    print("\n1. Testing document addition...")
-    test_documents_can_be_added()
-    print("   ✓ Documents can be added")
-    
-    print("\n2. Testing query returns context...")
-    test_query_returns_non_empty_context()
-    print("   ✓ Query returns non-empty context")
-    
-    print("\n3. Testing pipeline returns answer...")
-    test_pipeline_returns_string_answer()
-    print("   ✓ Pipeline returns string answer")
-    
-    print("\nAll tests passed!")
+def test_pipeline_rejects_empty_question():
+    embedding_service = MockEmbeddingService()
+    llm_service = MockLLMService()
+    vector_store = SimpleVectorStore()
 
+    pipeline = RAGPipeline(
+        embedding_service=embedding_service,
+        llm_service=llm_service,
+        vector_store=vector_store,
+    )
+
+    with pytest.raises(ValueError):
+        pipeline.answer("")
