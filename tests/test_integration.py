@@ -90,6 +90,23 @@ def test_vector_store_add_search_delete_and_persist(embedding_service):
         assert len(reloaded.metadata) == len(store.metadata)
 
 
+def test_vector_store_dimension_mismatch_can_reset(embedding_service):
+    with tempfile.TemporaryDirectory() as tmp:
+        store = FAISSVectorStore(index_path=tmp)
+        texts = ["نص اول", "نص ثاني"]
+        store.add_documents(texts, embedding_service.embed(texts))
+
+        with pytest.raises(ValueError):
+            store.ensure_embedding_dimension(64, reset_on_mismatch=False)
+
+        store.ensure_embedding_dimension(64, reset_on_mismatch=True)
+        stats = store.get_stats()
+
+        assert stats["embedding_dim"] == 64
+        assert stats["total_documents"] == 0
+        assert stats["total_vectors"] == 0
+
+
 def test_embedding_and_query_cache():
     emb_cache = EmbeddingCache(max_size=2, ttl_hours=1)
     q_cache = QueryResultCache(max_size=2, ttl_hours=1)

@@ -8,11 +8,16 @@ without modifying code.
 from os import getenv
 from typing import Optional
 
+from dotenv import load_dotenv
+
+
+load_dotenv()
+
 
 class Config:
     """Configuration class for Arabic RAG system."""
 
-    EMBEDDING_MODEL: str = getenv("EMBEDDING_MODEL", "intfloat/multilingual-e5-large")
+    EMBEDDING_MODEL: str = getenv("EMBEDDING_MODEL", "distiluse-base-multilingual-cased-v2")
     EMBEDDING_DEVICE: Optional[str] = getenv("EMBEDDING_DEVICE", None)
 
     LLM_MODEL: str = getenv("LLM_MODEL", "gemini-2.0-flash")

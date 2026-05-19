@@ -70,6 +70,8 @@ class DocumentLoader:
             return self._load_pdf(file_path)
         elif file_ext == '.txt':
             return self._load_text(file_path)
+        elif file_ext in ('.docx', '.docs'):
+            return self._load_docx(file_path)
         else:
             logger.error(f"Unsupported file format: {file_ext}")
             return []
@@ -113,6 +115,35 @@ class DocumentLoader:
             
         except Exception as e:
             logger.error(f"Error loading text file {file_path}: {str(e)}")
+            return []
+    
+    def _load_docx(self, file_path: str) -> List[DocumentChunk]:
+        """Load and chunk a DOCX file."""
+        try:
+            from docx import Document
+            
+            doc = Document(file_path)
+            full_text = ""
+            
+            for para in doc.paragraphs:
+                if para.text.strip():
+                    full_text += para.text + "\n"
+            
+            # Also extract text from tables
+            for table in doc.tables:
+                for row in table.rows:
+                    for cell in row.cells:
+                        if cell.text.strip():
+                            full_text += cell.text + "\n"
+            
+            doc_id = Path(file_path).stem
+            return self._chunk_text(full_text, doc_id, file_path)
+            
+        except ImportError:
+            logger.error("python-docx not installed. Install with: pip install python-docx")
+            return []
+        except Exception as e:
+            logger.error(f"Error loading DOCX file {file_path}: {str(e)}")
             return []
     
     def _chunk_text(

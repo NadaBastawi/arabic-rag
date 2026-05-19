@@ -74,6 +74,59 @@ class FAISSVectorStore:
             if self._embeddings_np is None:
                 self._embeddings_np = np.empty((0, embedding_dim), dtype=np.float32)
 
+    def clear(self) -> None:
+        """Clear all vectors and persisted index artifacts."""
+        self.index = None
+        self.metadata = []
+        self._embeddings_np = None
+        self._embedding_dim = None
+        self._next_id = 0
+
+        for path in (self.index_file, self.metadata_path, self.numpy_embeddings_path):
+            if os.path.exists(path):
+                try:
+                    os.remove(path)
+                except OSError as exc:
+                    logger.warning("Could not remove index artifact %s: %s", path, str(exc))
+
+    def ensure_embedding_dimension(
+        self,
+        embedding_dim: int,
+        reset_on_mismatch: bool = False,
+    ) -> None:
+        """
+        Ensure vector-store dimension matches the active embedding model.
+
+        When ``reset_on_mismatch`` is enabled and an existing persisted index
+        has a different dimension, the stale index is cleared so the caller can
+        re-index with the current model.
+        """
+        if embedding_dim <= 0:
+            raise ValueError("Embedding dimension must be a positive integer")
+
+        if self._embedding_dim is None:
+            self._ensure_index(embedding_dim)
+            return
+
+        if self._embedding_dim == embedding_dim:
+            self._ensure_index(embedding_dim)
+            return
+
+        mismatch_message = (
+            f"Embedding dimension mismatch: store={self._embedding_dim}, model={embedding_dim}"
+        )
+        if not reset_on_mismatch:
+            raise ValueError(mismatch_message)
+
+        logger.warning(
+            "%s. Clearing stale index at %s and reinitializing.",
+            mismatch_message,
+            self.index_path,
+        )
+        self.clear()
+        self._ensure_index(embedding_dim)
+        self._save()
+
     def _metadata_map(self) -> Dict[int, Dict]:
         return {int(item["faiss_id"]): item for item in self.metadata}
 

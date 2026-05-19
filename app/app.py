@@ -41,6 +41,10 @@ class ArabicRAGChatbot:
             max_tokens=config.LLM_MAX_TOKENS,
         )
         self.vector_store = FAISSVectorStore(index_path=config.INDEX_PATH)
+        self.vector_store.ensure_embedding_dimension(
+            self.embedding_service.get_embedding_dimension(),
+            reset_on_mismatch=True,
+        )
         self.document_loader = DocumentLoader(chunk_size=500, chunk_overlap=50)
         self.document_registry: Dict[str, Dict[str, Any]] = {}
 
@@ -278,30 +282,215 @@ class ArabicRAGChatbot:
 
 CUSTOM_CSS = """
 :root {
-  --bg: #f7f7f8;
-  --panel: #ffffff;
-  --border: #e5e7eb;
-  --text: #111827;
-  --muted: #6b7280;
+  --primary-yellow: #fbbf24;
+  --primary-amber: #f59e0b;
+  --light-bg: #fffbf0;
+  --white: #ffffff;
+  --gray-text: #374151;
+  --light-border: #fce7b6;
 }
+
+body, .gradio-container {
+  background: linear-gradient(135deg, #fffbf0 0%, #fef3c7 100%) !important;
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+}
+
 .gradio-container {
-  max-width: 1100px !important;
+  max-width: 1200px !important;
   margin: 0 auto !important;
-  background: var(--bg);
+  background: transparent;
 }
-#chat-shell {
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--panel);
-  padding: 10px;
+
+/* Header styling */
+#header {
+  text-align: center;
+  margin-bottom: 24px;
+  padding: 20px;
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.1), rgba(245, 158, 11, 0.1));
+  border-radius: 16px;
+  border: 2px solid var(--light-border);
 }
+
 #header h1 {
-  font-size: 1.4rem;
-  margin-bottom: 0.2rem;
+  font-size: 2.5rem;
+  font-weight: 700;
+  background: linear-gradient(135deg, #f59e0b, #fbbf24);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+  margin: 0 0 8px 0;
 }
+
 #header p {
-  color: var(--muted);
-  margin-top: 0;
+  color: var(--gray-text);
+  font-size: 1.1rem;
+  margin: 8px 0 0 0;
+  font-weight: 500;
+}
+
+/* Chat container */
+#chat-container {
+  background: var(--white);
+  border: 2px solid var(--light-border);
+  border-radius: 16px;
+  padding: 20px;
+  box-shadow: 0 10px 30px rgba(245, 158, 11, 0.1);
+}
+
+/* Chatbot styling */
+.gradio-chatbot {
+  background: var(--white) !important;
+  border: none !important;
+  border-radius: 12px !important;
+}
+
+.message.user {
+  background: linear-gradient(135deg, #fbbf24, #f59e0b) !important;
+  border-radius: 12px !important;
+  padding: 12px 16px !important;
+  color: white !important;
+  margin-bottom: 8px;
+}
+
+.message.bot {
+  background: #f3f4f6 !important;
+  border-radius: 12px !important;
+  padding: 12px 16px !important;
+  color: var(--gray-text) !important;
+  margin-bottom: 8px;
+}
+
+/* Input styling */
+.gradio-textbox input, .gradio-textbox textarea {
+  border: 2px solid var(--light-border) !important;
+  border-radius: 12px !important;
+  padding: 12px 16px !important;
+  font-size: 1rem !important;
+  background: var(--white) !important;
+  transition: all 0.3s ease !important;
+}
+
+.gradio-textbox input:focus, .gradio-textbox textarea:focus {
+  border-color: var(--primary-yellow) !important;
+  box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.1) !important;
+}
+
+/* Button styling */
+.gradio-button {
+  background: linear-gradient(135deg, #fbbf24, #f59e0b) !important;
+  border: none !important;
+  color: white !important;
+  font-weight: 600 !important;
+  border-radius: 10px !important;
+  padding: 12px 24px !important;
+  cursor: pointer !important;
+  transition: all 0.3s ease !important;
+  box-shadow: 0 4px 12px rgba(245, 158, 11, 0.2) !important;
+}
+
+.gradio-button:hover {
+  background: linear-gradient(135deg, #f59e0b, #d97706) !important;
+  box-shadow: 0 6px 16px rgba(245, 158, 11, 0.3) !important;
+  transform: translateY(-2px);
+}
+
+.gradio-button:active {
+  transform: translateY(0);
+}
+
+/* File input styling */
+.gradio-file {
+  border: 2px dashed var(--light-border) !important;
+  border-radius: 12px !important;
+  background: rgba(251, 191, 36, 0.05) !important;
+  padding: 20px !important;
+}
+
+/* Accordion styling */
+.gradio-accordion {
+  border: 2px solid var(--light-border) !important;
+  border-radius: 12px !important;
+  background: var(--white) !important;
+  margin-bottom: 12px !important;
+}
+
+.gradio-accordion-header {
+  background: linear-gradient(90deg, rgba(251, 191, 36, 0.1), transparent) !important;
+  border-radius: 10px !important;
+}
+
+/* Slider styling */
+.gradio-slider {
+  accent-color: var(--primary-yellow) !important;
+}
+
+/* Checkbox styling */
+.gradio-checkbox {
+  accent-color: var(--primary-yellow) !important;
+}
+
+/* Radio button styling */
+.gradio-radio {
+  accent-color: var(--primary-yellow) !important;
+}
+
+/* Status boxes */
+.gradio-textbox[interactive="false"] {
+  background: linear-gradient(135deg, rgba(251, 191, 36, 0.05), rgba(245, 158, 11, 0.03)) !important;
+}
+
+/* Right panel */
+#sidebar {
+  background: var(--white);
+  border: 2px solid var(--light-border);
+  border-radius: 16px;
+  padding: 16px;
+  box-shadow: 0 10px 30px rgba(245, 158, 11, 0.1);
+}
+
+/* Row and column spacing */
+.gradio-row {
+  gap: 16px !important;
+}
+
+.gradio-column {
+  gap: 12px !important;
+}
+
+/* Markdown styling */
+.gradio-markdown {
+  color: var(--gray-text) !important;
+}
+
+.gradio-markdown h1, .gradio-markdown h2, .gradio-markdown h3 {
+  color: var(--gray-text) !important;
+  font-weight: 700 !important;
+}
+
+/* Scrollbar styling */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: rgba(251, 191, 36, 0.1);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--primary-yellow);
+  border-radius: 10px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--primary-amber);
+}
+
+/* Label styling */
+.gradio-label {
+  color: var(--gray-text) !important;
+  font-weight: 600 !important;
 }
 """
 
@@ -325,64 +514,74 @@ def create_ui() -> gr.Blocks:
 
     with gr.Blocks(
         title="Arabic RAG Chatbot",
-        theme=gr.themes.Soft(primary_hue="gray", secondary_hue="slate"),
+        theme=gr.themes.Soft(primary_hue="amber", secondary_hue="yellow"),
         css=CUSTOM_CSS,
     ) as demo:
         with gr.Column(elem_id="header"):
-            gr.Markdown("# Arabic RAG Assistant")
+            gr.Markdown("# 💬 Arabic RAG Assistant")
             gr.Markdown(
-                "Simple chat experience. Upload/index docs, then ask questions with grounded answers."
+                "Upload documents and ask questions in Arabic or English. Get answers grounded in your documents."
             )
 
         with gr.Row():
-            with gr.Column(scale=4, elem_id="chat-shell"):
+            with gr.Column(scale=4, elem_id="chat-container"):
                 chatbot_ui = gr.Chatbot(
-                    label="Conversation",
+                    label="💭 Conversation",
                     height=560,
+                    scale=1,
+                    type="messages",
                 )
 
                 msg_input = gr.Textbox(
                     label="Message",
-                    placeholder="Ask in Arabic or English...",
+                    placeholder="Ask your question in Arabic or English...",
                     lines=2,
+                    scale=1,
                 )
 
-                with gr.Row():
-                    submit_btn = gr.Button("Send", variant="primary")
-                    clear_btn = gr.Button("New chat")
+                with gr.Row(scale=1):
+                    submit_btn = gr.Button("📤 Send", variant="primary", scale=1)
+                    clear_btn = gr.Button("🔄 New chat", scale=1)
 
-            with gr.Column(scale=2):
-                with gr.Accordion("Retrieval Settings", open=True):
+            with gr.Column(scale=2, elem_id="sidebar"):
+                with gr.Accordion("⚙️ Retrieval Settings", open=True):
                     retrieval_mode = gr.Radio(
                         ["basic", "multi_stage"],
-                        label="Mode",
+                        label="Retrieval Mode",
                         value="multi_stage",
                     )
-                    top_k_slider = gr.Slider(1, 10, value=5, step=1, label="Top K")
-                    show_sources = gr.Checkbox(label="Show sources", value=True)
+                    top_k_slider = gr.Slider(1, 10, value=5, step=1, label="Top K Results")
+                    show_sources = gr.Checkbox(label="Show Sources", value=True)
 
-                with gr.Accordion("Knowledge Base", open=True):
-                    file_input = gr.File(label="Upload PDF/TXT", file_types=[".pdf", ".txt"])
-                    upload_btn = gr.Button("Upload and index")
-                    upload_status = gr.Textbox(label="Upload status", interactive=False)
-
-                    docs_textarea = gr.Textbox(
-                        label="Paste documents (separate by blank line)",
-                        lines=8,
+                with gr.Accordion("📚 Knowledge Base", open=True):
+                    gr.Markdown("**Upload Documents**")
+                    file_input = gr.File(
+                        label="Upload Files (PDF, DOCX, TXT)",
+                        file_types=[".pdf", ".docx", ".txt"],
+                        file_count="single"
                     )
-                    index_btn = gr.Button("Index pasted documents")
-                    index_status = gr.Textbox(label="Index status", interactive=False)
+                    upload_btn = gr.Button("📥 Upload & Index", variant="primary")
+                    upload_status = gr.Textbox(label="Status", interactive=False, lines=2)
+
+                    gr.Markdown("**Paste Documents**")
+                    docs_textarea = gr.Textbox(
+                        label="Paste text (separate by blank line)",
+                        lines=6,
+                        placeholder="Paste your documents here...",
+                    )
+                    index_btn = gr.Button("📝 Index Documents", variant="primary")
+                    index_status = gr.Textbox(label="Status", interactive=False, lines=2)
 
                     with gr.Row():
-                        docs_list_btn = gr.Button("List docs")
-                        stats_btn = gr.Button("Stats")
+                        docs_list_btn = gr.Button("📋 List Docs", scale=1)
+                        stats_btn = gr.Button("📊 Stats", scale=1)
 
                     kb_output = gr.Markdown()
 
-                with gr.Accordion("Debug Retrieval", open=False):
-                    score_query = gr.Textbox(label="Query")
+                with gr.Accordion("🔍 Debug Retrieval", open=False):
+                    score_query = gr.Textbox(label="Query", placeholder="Search query...")
                     score_top_k = gr.Slider(1, 10, value=5, step=1, label="Top K")
-                    score_btn = gr.Button("Get scores")
+                    score_btn = gr.Button("Search", variant="primary")
                     score_output = gr.Markdown()
 
         submit_btn.click(

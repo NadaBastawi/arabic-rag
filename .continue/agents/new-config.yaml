@@ -1,0 +1,4 @@
+models:
+  - name: My Local AI
+    provider: ollama
+    model: qwen2.5-coder:1.5b

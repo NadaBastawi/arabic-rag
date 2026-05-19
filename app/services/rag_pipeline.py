@@ -4,6 +4,7 @@ RAG pipeline for question answering.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Dict, List, Protocol
 
 import numpy as np
@@ -61,7 +62,13 @@ class RAGPipeline:
             raise ValueError("Question must be a non-empty string")
 
         try:
-            if self.retrieval_mode == "multi_stage" and self.multi_stage_retriever:
+            use_fast_retrieval = (
+                self.retrieval_mode == "multi_stage"
+                and hasattr(self.llm_service, "is_quota_backoff_active")
+                and self.llm_service.is_quota_backoff_active()
+            )
+
+            if self.retrieval_mode == "multi_stage" and self.multi_stage_retriever and not use_fast_retrieval:
                 retrieved_docs = self.multi_stage_retriever.retrieve(question, top_k=self.top_k)
             else:
                 question_embedding = self.embedding_service.embed(question)
@@ -77,11 +84,100 @@ class RAGPipeline:
                 context = "\n\n".join(context_parts)
 
             prompt = self._construct_prompt(question, context)
-            return self.llm_service.generate(prompt)
+            answer = self.llm_service.generate(prompt)
+
+            if answer == LLMService.LLM_QUOTA_EXCEEDED:
+                return self._build_retrieval_fallback(
+                    question,
+                    retrieved_docs,
+                    reason=(
+                        "LLM quota/rate limit reached, so I am returning a quick extract from your documents."
+                    ),
+                )
+            if answer == LLMService.LLM_API_UNAVAILABLE:
+                return self._build_retrieval_fallback(
+                    question,
+                    retrieved_docs,
+                    reason=(
+                        "LLM API is unavailable or API key is missing, so I am returning a quick extract from your documents."
+                    ),
+                )
+            if answer.startswith("Error generating response:"):
+                return self._build_retrieval_fallback(
+                    question,
+                    retrieved_docs,
+                    reason="LLM generation failed, so I am returning a quick extract from your documents.",
+                )
+
+            return answer
         except ValueError:
             raise
         except Exception as exc:
             raise RuntimeError(f"Failed to generate answer: {str(exc)}") from exc
+
+    @staticmethod
+    def _build_retrieval_fallback(
+        question: str,
+        retrieved_docs: List[Dict[str, Any]],
+        reason: str,
+    ) -> str:
+        """Return a retrieval-only answer when generation is unavailable."""
+        if not retrieved_docs:
+            return (
+                f"{reason}\n\n"
+                "No relevant passages were found in the indexed documents for this question."
+            )
+
+        terms = RAGPipeline._query_terms(question)
+        candidates: List[Dict[str, Any]] = []
+        seen = set()
+
+        for doc in retrieved_docs:
+            raw_text = doc.get("text", "") or ""
+            snippet = RAGPipeline._clean_snippet(raw_text)
+            if len(snippet) < 40:
+                continue
+
+            dedupe_key = snippet[:180]
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+
+            snippet_terms = RAGPipeline._query_terms(snippet)
+            overlap = len(terms.intersection(snippet_terms)) if terms else 0
+            score = float(doc.get("score", 0.0))
+            candidates.append(
+                {
+                    "snippet": snippet,
+                    "overlap": overlap,
+                    "score": score,
+                    "source": doc.get("source", "unknown"),
+                }
+            )
+
+        if not candidates:
+            return f"{reason}\n\nNo clean passages were extracted from the retrieved chunks."
+
+        candidates.sort(key=lambda item: (item["overlap"], item["score"]), reverse=True)
+
+        lines = [reason, "", "Quick evidence from your docs:"]
+        for idx, item in enumerate(candidates[:2], 1):
+            lines.append(f"{idx}. {item['snippet'][:180]}")
+        return "\n".join(lines)
+
+    @staticmethod
+    def _query_terms(text: str) -> set[str]:
+        tokens = re.findall(r"[\w\u0600-\u06FF]+", (text or "").lower(), flags=re.UNICODE)
+        return {token for token in tokens if len(token) >= 3}
+
+    @staticmethod
+    def _clean_snippet(text: str) -> str:
+        cleaned = text or ""
+        cleaned = re.sub(r"https?://\S+|www\.\S+", " ", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b\S*[\\/]\S*\b", " ", cleaned)
+        cleaned = re.sub(r"\b[^\s]{20,}\b", " ", cleaned)
+        cleaned = re.sub(r"\s+", " ", cleaned).strip()
+        return cleaned
 
     def _construct_prompt(self, question: str, context: str) -> str:
         return (

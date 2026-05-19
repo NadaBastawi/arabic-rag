@@ -10,10 +10,13 @@ Provides REST API endpoints for:
 
 from typing import List, Optional
 from fastapi import FastAPI, HTTPException, File, UploadFile
+from fastapi.responses import FileResponse # Import FileResponse
+from fastapi.staticfiles import StaticFiles # Import StaticFiles
 from pydantic import BaseModel, Field
 from contextlib import asynccontextmanager
 import logging
 import os
+import re
 import tempfile
 
 from app.config import config
@@ -55,6 +58,57 @@ def _build_reranker() -> ArabicReRanker:
     )
 
 
+def _query_terms(text: str) -> set[str]:
+    tokens = re.findall(r"[\w\u0600-\u06FF]+", (text or "").lower(), flags=re.UNICODE)
+    return {token for token in tokens if len(token) >= 3}
+
+
+def _clean_snippet(text: str) -> str:
+    cleaned = text or ""
+    cleaned = re.sub(r"https?://\S+|www\.\S+", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\b\S*[\\/]\S*\b", " ", cleaned)
+    cleaned = re.sub(r"\b[^\s]{20,}\b", " ", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    return cleaned
+
+
+def _build_retrieval_fallback_answer(question: str, retrieved_docs: List[dict], reason: str) -> str:
+    """Return a retrieval-only answer when LLM generation is unavailable."""
+    if not retrieved_docs:
+        return (
+            f"{reason}\n\n"
+            "No relevant passages were found in the indexed documents for this question."
+        )
+
+    terms = _query_terms(question)
+    candidates = []
+    seen = set()
+
+    for doc in retrieved_docs:
+        snippet = _clean_snippet(doc.get("text", "") or "")
+        if len(snippet) < 40:
+            continue
+
+        dedupe_key = snippet[:180]
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+
+        overlap = len(terms.intersection(_query_terms(snippet))) if terms else 0
+        score = float(doc.get("score", 0.0))
+        candidates.append({"snippet": snippet, "overlap": overlap, "score": score})
+
+    if not candidates:
+        return f"{reason}\n\nNo clean passages were extracted from the retrieved chunks."
+
+    candidates.sort(key=lambda item: (item["overlap"], item["score"]), reverse=True)
+
+    lines = [reason, "", "Quick evidence from your docs:"]
+    for idx, item in enumerate(candidates[:2], 1):
+        lines.append(f"{idx}. {item['snippet'][:180]}")
+    return "\n".join(lines)
+
+
 def get_services():
     """Initialize and return all services."""
     global embedding_service, llm_service, vector_store, rag_pipeline, embedding_cache, query_cache, document_loader
@@ -78,6 +132,8 @@ def get_services():
     if vector_store is None:
         logger.info(f"Initializing persistent FAISS store: {config.INDEX_PATH}")
         vector_store = FAISSVectorStore(index_path=config.INDEX_PATH)
+        expected_dim = embedding_service.get_embedding_dimension()
+        vector_store.ensure_embedding_dimension(expected_dim, reset_on_mismatch=True)
     
     if embedding_cache is None:
         embedding_cache = EmbeddingCache(max_size=10000, ttl_hours=24)
@@ -118,6 +174,14 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan
 )
+
+# Mount static files for the UI
+app.mount("/static", StaticFiles(directory="static"), name="static")
+
+@app.get("/")
+async def serve_index():
+    """Serve the main HTML page."""
+    return FileResponse("static/index.html")
 
 
 class IndexRequest(BaseModel):
@@ -196,14 +260,6 @@ class ScoreRequest(BaseModel):
 class ScoreResponse(BaseModel):
     """Response model for detailed scores."""
     documents: List[dict]
-
-
-@app.get("/")
-async def root():
-    """Root endpoint."""
-    return {"message": "Arabic RAG API", "version": "1.0.0"}
-
-
 @app.get("/health")
 async def health():
     """Health check endpoint."""
@@ -270,8 +326,12 @@ async def query(request: QueryRequest):
 
         retrieval_mode = request.retrieval_mode or pipeline.retrieval_mode
         top_k = request.top_k or pipeline.top_k
+        use_fast_retrieval = (
+            retrieval_mode == "multi_stage"
+            and llm_svc.is_quota_backoff_active()
+        )
 
-        if retrieval_mode == "multi_stage":
+        if retrieval_mode == "multi_stage" and not use_fast_retrieval:
             if config.USE_ADAPTIVE:
                 retriever = AdaptiveRetrieval(embed_svc, vs)
             else:
@@ -284,7 +344,7 @@ async def query(request: QueryRequest):
             retrieved_docs = retriever.retrieve(question, top_k=top_k)
         else:
             q_emb = embed_svc.embed(question)
-            retrieved_docs = vs.search(q_emb, top_k=top_k)
+            retrieved_docs = vs.search(q_emb, top_k=min(top_k, 3))
 
         if not retrieved_docs:
             context = "لا توجد معلومات متاحة في قاعدة المعرفة."
@@ -296,6 +356,24 @@ async def query(request: QueryRequest):
 
         prompt = pipeline._construct_prompt(question, context)
         answer = llm_svc.generate(prompt)
+        if answer == LLMService.LLM_QUOTA_EXCEEDED:
+            answer = _build_retrieval_fallback_answer(
+                question,
+                retrieved_docs,
+                "LLM quota/rate limit reached, so I am returning a quick extract from your documents.",
+            )
+        elif answer == LLMService.LLM_API_UNAVAILABLE:
+            answer = _build_retrieval_fallback_answer(
+                question,
+                retrieved_docs,
+                "LLM API is unavailable or API key is missing, so I am returning a quick extract from your documents.",
+            )
+        elif answer.startswith("Error generating response:"):
+            answer = _build_retrieval_fallback_answer(
+                question,
+                retrieved_docs,
+                "LLM generation failed, so I am returning a quick extract from your documents.",
+            )
 
         return QueryResponse(
             answer=answer,
@@ -590,12 +668,16 @@ async def clear_documents():
         Success message
     """
     try:
-        global vector_store, rag_pipeline, document_registry
+        global rag_pipeline, document_registry
 
         embed_svc, llm_svc, _, _ = get_services()
 
-        # Clear vector store by reinitializing and rewire pipeline.
-        vector_store = FAISSVectorStore(index_path=config.INDEX_PATH)
+        # Clear vector store data and persisted artifacts, then rewire pipeline.
+        vector_store.clear()
+        vector_store.ensure_embedding_dimension(
+            embed_svc.get_embedding_dimension(),
+            reset_on_mismatch=False,
+        )
         rag_pipeline = RAGPipeline(
             embedding_service=embed_svc,
             llm_service=llm_svc,

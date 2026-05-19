@@ -30,12 +30,22 @@ class EmbeddingService:
         fallback_dimension: int = 384,
     ):
         self.model_name = model_name
-        self.device = device
+        self.device = self._normalize_device(device)
         self.fallback_dimension = fallback_dimension
 
         self.model = None
         self._using_fallback = False
         self._load_model()
+
+    @staticmethod
+    def _normalize_device(device: str | None) -> str | None:
+        if device is None:
+            return None
+
+        normalized = str(device).split("#", 1)[0].strip().lower()
+        if not normalized or normalized in {"auto", "none", "default"}:
+            return None
+        return normalized
 
     def _load_model(self) -> None:
         """Load sentence-transformers model or enable fallback mode."""
