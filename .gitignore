@@ -48,6 +48,17 @@ virtualenv/
 /logs/
 *.log
 
+# AI Assistant Config
+.continue/
+
+# Vector Store & Models
+*.faiss
+*.pkl
+index_data/
+
+# Testing
+.pytest_cache/
+
 # Temporary files
 *.tmp
 *.temp
