@@ -2,10 +2,6 @@
 
 An end-to-end Arabic RAG system that combines multi-stage retrieval, morphology-aware preprocessing, and LLM-powered generation to answer questions over Arabic document collections. The system handles the linguistic complexity of Arabic (root patterns, diacritics, morphological variation) through specialized preprocessing, retrieves relevant documents using FAISS vector search with learned reranking, and generates answers via Google Gemini. Packaged as a FastAPI backend with a Gradio chat interface and deployed via Docker.
 
-## Demo
-
-<!-- Add a screenshot or GIF of the Gradio UI here -->
-![Ar-RAG Demo](docs/demo.png)
 
 ## Features
 
