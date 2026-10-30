@@ -33,9 +33,15 @@ class MockEmbeddingService:
 
 
 class MockLLMService:
+    def __init__(self, question: str, context: str):
+        self.question = question
+        self.context = context
+
     def generate(self, prompt: str) -> str:
-        assert "??????:" in prompt
-        return "????? ???????"
+        assert "استخدم المعلومات التالية من قاعدة المعرفة للإجابة على السؤال." in prompt
+        assert self.question in prompt
+        assert self.context in prompt
+        return "إجابة تجريبية"
 
 
 class QuotaExceededLLMService:
@@ -65,14 +71,19 @@ def test_documents_can_be_added_and_searched():
 
 def test_pipeline_returns_non_empty_answer():
     embedding_service = MockEmbeddingService()
-    llm_service = MockLLMService()
     vector_store = SimpleVectorStore()
 
     docs = [
-        "?????? ????????? ?????? ?? ????",
-        "?????? ?????? ??? ?? ?????? ?????",
+        "اللغة العربية غنية بالمفردات",
+        "القراءة تساعد على اكتساب المعرفة",
     ]
     vector_store.add_documents(docs, embedding_service.embed(docs))
+    question = "ما أهمية اللغة العربية؟"
+    results = vector_store.search(embedding_service.embed(question), top_k=2)
+    context = "\n\n".join(
+        f"المستند {idx + 1}: {doc['text']}" for idx, doc in enumerate(results)
+    )
+    llm_service = MockLLMService(question, context)
 
     pipeline = RAGPipeline(
         embedding_service=embedding_service,
@@ -82,15 +93,15 @@ def test_pipeline_returns_non_empty_answer():
         retrieval_mode="basic",
     )
 
-    answer = pipeline.answer("?? ?? ?????? ??????????")
+    answer = pipeline.answer(question)
 
     assert isinstance(answer, str)
-    assert answer.strip() == "????? ???????"
+    assert answer.strip() == "إجابة تجريبية"
 
 
 def test_pipeline_rejects_empty_question():
     embedding_service = MockEmbeddingService()
-    llm_service = MockLLMService()
+    llm_service = MockLLMService("", "")
     vector_store = SimpleVectorStore()
 
     pipeline = RAGPipeline(
