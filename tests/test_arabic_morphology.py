@@ -17,3 +17,27 @@ from app.utils.arabic_morphology import LightArabicAnalyzer
 )
 def test_normalize_restores_arabic_and_preserves_punctuation(text, expected):
     assert LightArabicAnalyzer().normalize(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("word", "expected"),
+    [
+        ("الكتاب", "كتاب"),
+        ("والكلمات", "كلم"),
+        ("بالمدارس", "مدارس"),
+        ("مكتوب", "مكتوب"),
+        ("مدرسة", "مدرس"),
+        ("معلمون", "معلم"),
+        ("كتابات", "كتاب"),
+        ("البيات", "بيات"),
+        ("العب", "العب"),
+        ("والالكتاب", "الكتاب"),
+        ("كتاباتها", "كتابات"),
+    ],
+)
+def test_extract_roots_returns_light_stem_keys(word, expected):
+    assert LightArabicAnalyzer().extract_roots(word) == {expected}
+
+
+def test_extract_roots_ignores_words_shorter_than_four_after_normalizing():
+    assert LightArabicAnalyzer().extract_roots("كِتْبٌ قلم") == set()

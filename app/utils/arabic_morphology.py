@@ -116,29 +116,31 @@ class LightArabicAnalyzer:
         return normalize_arabic(text)
 
     def extract_roots(self, text: str) -> Set[str]:
+        """Return light stem keys, not morphological roots, for normalized words."""
         if not text:
             return set()
 
         text = self.normalize(text)
         roots: Set[str] = set()
+        prefixes = ("وال", "بال", "كال", "فال", "ال", "لل")
+        suffixes = ("يات", "ات", "ون", "ين", "ان", "ها", "هم", "هن", "كم", "كن", "نا", "ه", "ي")
 
         for word in text.split():
-            word = word.strip()
-            if len(word) < 3:
+            if len(word) < 4:
                 continue
-            if word.startswith("?") and len(word) == 5:
-                roots.add(word[1:4])
-            elif word.startswith("?") and len(word) == 5:
-                roots.add(word[1:4])
-            elif len(word) == 3:
-                roots.add(word)
-            elif len(word) == 4:
-                if word[1] == word[2]:
-                    roots.add(word[0] + word[1] + word[3])
-                else:
-                    roots.add(word[:3])
-            elif len(word) >= 6:
-                roots.add(word[:3])
+
+            for prefix in prefixes:
+                if word.startswith(prefix) and len(word) - len(prefix) >= 3:
+                    word = word[len(prefix):]
+                    break
+
+            for suffix in suffixes:
+                if word.endswith(suffix):
+                    if len(word) - len(suffix) >= 3:
+                        word = word[:-len(suffix)]
+                    break
+
+            roots.add(word)
 
         return roots
 
