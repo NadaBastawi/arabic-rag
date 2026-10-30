@@ -8,6 +8,8 @@ import logging
 import re
 from typing import Dict, List, Set
 
+from app.utils.arabic_preprocessing import normalize_arabic
+
 logger = logging.getLogger(__name__)
 
 
@@ -111,14 +113,7 @@ class LightArabicAnalyzer:
         self.arabic_pattern = re.compile(r"[\u0600-\u06FF]+")
 
     def normalize(self, text: str) -> str:
-        if not text:
-            return ""
-        text = text.replace("?", "?").replace("?", "?").replace("?", "?")
-        text = text.replace("?", "?").replace("?", "?").replace("?", "?")
-        text = text.replace("?", "?").replace("?", "")
-        text = re.sub(r"[\u064B-\u065F\u0670]", "", text)
-        text = re.sub(r"\s+", " ", text)
-        return text.strip()
+        return normalize_arabic(text)
 
     def extract_roots(self, text: str) -> Set[str]:
         if not text:
