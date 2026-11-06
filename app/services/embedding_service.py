@@ -18,9 +18,8 @@ class EmbeddingService:
     """
     Generate embeddings with sentence-transformers when available.
 
-    If model loading fails (for example in offline environments), the service
-    falls back to a deterministic hashed embedding implementation so the
-    pipeline remains operational and testable.
+    A deterministic hashed embedding implementation is available only when
+    explicitly enabled for local development and tests.
     """
 
     def __init__(
@@ -28,10 +27,12 @@ class EmbeddingService:
         model_name: str = "intfloat/multilingual-e5-large",
         device: str | None = None,
         fallback_dimension: int = 384,
+        allow_fallback: bool = False,
     ):
         self.model_name = model_name
         self.device = self._normalize_device(device)
         self.fallback_dimension = fallback_dimension
+        self.allow_fallback = allow_fallback
 
         self.model = None
         self._using_fallback = False
@@ -52,6 +53,10 @@ class EmbeddingService:
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError:
+            if not self.allow_fallback:
+                raise RuntimeError(
+                    "sentence-transformers is not installed and embedding fallback is disabled"
+                )
             self._using_fallback = True
             logger.warning(
                 "sentence-transformers is not installed; using hashed fallback embeddings"
@@ -62,6 +67,10 @@ class EmbeddingService:
             self.model = SentenceTransformer(self.model_name, device=self.device)
             self._using_fallback = False
         except Exception as exc:
+            if not self.allow_fallback:
+                raise RuntimeError(
+                    f"Failed to load embedding model '{self.model_name}'"
+                ) from exc
             self._using_fallback = True
             logger.warning(
                 "Failed to load embedding model '%s' (%s). Using hashed fallback embeddings.",
@@ -123,6 +132,10 @@ class EmbeddingService:
                 )
                 embeddings = np.asarray(embeddings, dtype=np.float32)
             except Exception as exc:
+                if not self.allow_fallback:
+                    raise RuntimeError(
+                        f"Embedding model '{self.model_name}' failed to encode input"
+                    ) from exc
                 logger.warning(
                     "Model embedding failed (%s). Falling back to hashed embeddings.",
                     str(exc),

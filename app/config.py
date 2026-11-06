@@ -19,6 +19,10 @@ class Config:
 
     EMBEDDING_MODEL: str = getenv("EMBEDDING_MODEL", "distiluse-base-multilingual-cased-v2")
     EMBEDDING_DEVICE: Optional[str] = getenv("EMBEDDING_DEVICE", None)
+    ALLOW_EMBEDDING_FALLBACK: bool = (
+        getenv("ALLOW_EMBEDDING_FALLBACK", "false").lower() == "true"
+    )
+    INDEX_SCHEMA_VERSION: int = int(getenv("INDEX_SCHEMA_VERSION", "1"))
 
     LLM_MODEL: str = getenv("LLM_MODEL", "gemini-2.0-flash")
     LLM_API_KEY: str = getenv("LLM_API_KEY", "")

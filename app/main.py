@@ -117,7 +117,8 @@ def get_services():
         logger.info(f"Loading embedding model: {config.EMBEDDING_MODEL}")
         embedding_service = EmbeddingService(
             model_name=config.EMBEDDING_MODEL,
-            device=config.EMBEDDING_DEVICE
+            device=config.EMBEDDING_DEVICE,
+            allow_fallback=config.ALLOW_EMBEDDING_FALLBACK,
         )
     
     if llm_service is None:
@@ -131,9 +132,13 @@ def get_services():
     
     if vector_store is None:
         logger.info(f"Initializing persistent FAISS store: {config.INDEX_PATH}")
-        vector_store = FAISSVectorStore(index_path=config.INDEX_PATH)
+        vector_store = FAISSVectorStore(
+            index_path=config.INDEX_PATH,
+            embedding_model=config.EMBEDDING_MODEL,
+            schema_version=config.INDEX_SCHEMA_VERSION,
+        )
         expected_dim = embedding_service.get_embedding_dimension()
-        vector_store.ensure_embedding_dimension(expected_dim, reset_on_mismatch=True)
+        vector_store.ensure_embedding_dimension(expected_dim, reset_on_mismatch=False)
     
     if embedding_cache is None:
         embedding_cache = EmbeddingCache(max_size=10000, ttl_hours=24)
@@ -568,7 +573,15 @@ async def upload_document(file: UploadFile = File(...)):
                 texts=texts,
                 embeddings=embeddings,
                 document_ids=[doc_id] * len(chunks),
-                sources=sources
+                sources=sources,
+                metadata_list=[
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "page_num": chunk.page_num,
+                        **chunk.metadata,
+                    }
+                    for chunk in chunks
+                ],
             )
             
             # Update registry

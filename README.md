@@ -12,6 +12,8 @@ An end-to-end Arabic RAG system that combines multi-stage retrieval, morphology-
 - **Gradio chat UI** — Interactive web interface for conversational document Q&A
 - **Dockerized deployment** — Single-command deployment with docker-compose
 - **Document ingestion** — Supports PDF and plain text uploads; automatic chunking and embedding
+- **Persistent index safety** — Embedding model and dimension are recorded; incompatible
+  indexes fail explicitly instead of being deleted
 
 ## Architecture
 
@@ -171,6 +173,15 @@ docker compose up --build
 - **Chat UI:** http://localhost:7860
 
 Ensure `.env` is in the project root with `LLM_API_KEY` set.
+
+### Index and embedding safety
+
+The API and Gradio application use the same persistent index configuration. On
+startup, the active embedding model and vector dimension are checked against the
+index manifest. A mismatch fails startup without deleting existing documents.
+Set `ALLOW_EMBEDDING_FALLBACK=true` only for local tests or offline development;
+production deployments must use a real embedding model. Reindex explicitly
+after changing `EMBEDDING_MODEL` or its dimension.
 
 ## API Reference
 

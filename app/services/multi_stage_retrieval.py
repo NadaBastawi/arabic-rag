@@ -115,8 +115,8 @@ class ArabicReRanker:
                 position_bonus = 0.05 * (3 - idx)
                 combined_score += position_bonus
             
-            reranked.append({
-                'text': text,
+            reranked_doc = dict(doc)
+            reranked_doc.update({
                 'score': float(combined_score),
                 'semantic_score': float(semantic_score),
                 'lexical_score': float(lexical_score),
@@ -125,6 +125,7 @@ class ArabicReRanker:
                 'ngram_score': float(ngram_score),
                 'exact_match': float(exact_match)
             })
+            reranked.append(reranked_doc)
         
         reranked.sort(key=lambda x: x['score'], reverse=True)
         
