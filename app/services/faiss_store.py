@@ -22,11 +22,20 @@ class FAISSVectorStore:
     while preserving the same API.
     """
 
-    def __init__(self, index_path: str = "./data/index"):
+    def __init__(
+        self,
+        index_path: str = "./data/index",
+        embedding_model: Optional[str] = None,
+        schema_version: int = 1,
+    ):
         self.index_path = index_path
         self.index_file = os.path.join(index_path, "index.faiss")
         self.metadata_path = os.path.join(index_path, "metadata.json")
         self.numpy_embeddings_path = os.path.join(index_path, "embeddings.npy")
+        self.manifest_path = os.path.join(index_path, "manifest.json")
+        self.embedding_model = embedding_model
+        self.schema_version = schema_version
+        self._manifest: Dict = {}
 
         os.makedirs(index_path, exist_ok=True)
 
@@ -88,6 +97,8 @@ class FAISSVectorStore:
                     os.remove(path)
                 except OSError as exc:
                     logger.warning("Could not remove index artifact %s: %s", path, str(exc))
+        if os.path.exists(self.manifest_path):
+            os.remove(self.manifest_path)
 
     def ensure_embedding_dimension(
         self,
@@ -97,12 +108,28 @@ class FAISSVectorStore:
         """
         Ensure vector-store dimension matches the active embedding model.
 
-        When ``reset_on_mismatch`` is enabled and an existing persisted index
-        has a different dimension, the stale index is cleared so the caller can
-        re-index with the current model.
+        Resetting is an explicit destructive operation and must never be enabled
+        during normal application startup.
         """
         if embedding_dim <= 0:
             raise ValueError("Embedding dimension must be a positive integer")
+
+        stored_model = self._manifest.get("embedding_model")
+        stored_schema = self._manifest.get("schema_version")
+        if stored_schema is not None and stored_schema != self.schema_version:
+            raise ValueError(
+                "Index schema mismatch: "
+                f"store={stored_schema}, expected={self.schema_version}; explicit reindex required"
+            )
+        if (
+            stored_model
+            and self.embedding_model
+            and stored_model != self.embedding_model
+        ):
+            raise ValueError(
+                "Embedding model mismatch: "
+                f"store={stored_model}, model={self.embedding_model}; explicit reindex required"
+            )
 
         if self._embedding_dim is None:
             self._ensure_index(embedding_dim)
@@ -177,7 +204,12 @@ class FAISSVectorStore:
         """Compatibility alias for older code paths."""
         self.add_documents(texts=texts, embeddings=embeddings)
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict]:
+    def search(
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 5,
+        workspace_id: Optional[str] = None,
+    ) -> List[Dict]:
         if top_k < 1:
             return []
         if not self.metadata:
@@ -201,7 +233,11 @@ class FAISSVectorStore:
             if self.index is None or self.index.ntotal == 0:
                 return []
 
-            scores, ids = self.index.search(query, min(top_k, self.index.ntotal))
+            # Search all vectors when a tenant filter is active.  Filtering
+            # after a top-k search could otherwise return too few or leak
+            # another tenant's nearest result into the ranking pipeline.
+            search_k = self.index.ntotal if workspace_id else min(top_k, self.index.ntotal)
+            scores, ids = self.index.search(query, search_k)
             score_row = scores[0]
             id_row = ids[0]
 
@@ -211,18 +247,26 @@ class FAISSVectorStore:
                 meta = metadata_by_id.get(int(idx))
                 if not meta:
                     continue
+                if workspace_id and meta.get("workspace_id") != workspace_id:
+                    continue
                 results.append(self._format_result(meta, float(score)))
+                if len(results) >= top_k:
+                    break
         else:
             if self._embeddings_np is None or len(self._embeddings_np) == 0:
                 return []
 
             scores = np.dot(self._embeddings_np, query[0])
-            top_indices = np.argsort(scores)[::-1][: min(top_k, len(scores))]
+            top_indices = np.argsort(scores)[::-1]
             metadata_sorted = sorted(self.metadata, key=lambda item: int(item["faiss_id"]))
 
             for pos in top_indices:
                 meta = metadata_sorted[int(pos)]
+                if workspace_id and meta.get("workspace_id") != workspace_id:
+                    continue
                 results.append(self._format_result(meta, float(scores[int(pos)])))
+                if len(results) >= top_k:
+                    break
 
         return results
 
@@ -237,9 +281,12 @@ class FAISSVectorStore:
             "metadata": {k: v for k, v in meta.items() if k not in excluded},
         }
 
-    def delete_document(self, document_id: str) -> bool:
+    def delete_document(self, document_id: str, workspace_id: Optional[str] = None) -> bool:
         ids_to_remove = [
-            int(item["faiss_id"]) for item in self.metadata if item.get("document_id") == document_id
+            int(item["faiss_id"])
+            for item in self.metadata
+            if item.get("document_id") == document_id
+            and (not workspace_id or item.get("workspace_id") == workspace_id)
         ]
         if not ids_to_remove:
             return False
@@ -269,17 +316,35 @@ class FAISSVectorStore:
 
         with open(self.metadata_path, "w", encoding="utf-8") as f:
             json.dump(self.metadata, f, ensure_ascii=False, indent=2)
+        self._manifest = {
+            "schema_version": self.schema_version,
+            "embedding_model": self.embedding_model,
+            "embedding_dimension": self._embedding_dim,
+            "backend": self._backend,
+        }
+        with open(self.manifest_path, "w", encoding="utf-8") as f:
+            json.dump(self._manifest, f, ensure_ascii=False, indent=2)
 
     def _load(self) -> None:
         self._init_backend()
+
+        if os.path.exists(self.manifest_path):
+            try:
+                with open(self.manifest_path, "r", encoding="utf-8") as f:
+                    self._manifest = json.load(f)
+            except (OSError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Could not load index manifest at {self.manifest_path}"
+                ) from exc
 
         if os.path.exists(self.metadata_path):
             try:
                 with open(self.metadata_path, "r", encoding="utf-8") as f:
                     self.metadata = json.load(f)
-            except Exception as exc:
-                logger.warning("Could not load metadata: %s", str(exc))
-                self.metadata = []
+            except (OSError, ValueError) as exc:
+                raise RuntimeError(
+                    f"Could not load index metadata at {self.metadata_path}"
+                ) from exc
 
         if self.metadata:
             self._next_id = max(int(item.get("faiss_id", -1)) for item in self.metadata) + 1
@@ -292,10 +357,13 @@ class FAISSVectorStore:
                     self.index = self._faiss.read_index(self.index_file)
                     self._embedding_dim = self.index.d
                 except Exception as exc:
-                    logger.warning("Could not load FAISS index, starting fresh: %s", str(exc))
-                    self.index = None
+                    raise RuntimeError(
+                        f"Could not load FAISS index at {self.index_file}"
+                    ) from exc
             elif self.metadata:
-                logger.warning("Metadata exists but FAISS index is missing; starting empty index")
+                raise RuntimeError(
+                    f"Metadata exists but FAISS index is missing at {self.index_file}"
+                )
         else:
             if os.path.exists(self.numpy_embeddings_path):
                 try:
@@ -304,14 +372,15 @@ class FAISSVectorStore:
                         self._embeddings_np = self._embeddings_np.reshape(1, -1)
                     if len(self._embeddings_np) > 0:
                         self._embedding_dim = int(self._embeddings_np.shape[1])
-                except Exception as exc:
-                    logger.warning("Could not load NumPy embeddings, starting fresh: %s", str(exc))
-                    self._embeddings_np = None
+                except (OSError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"Could not load NumPy embeddings at {self.numpy_embeddings_path}"
+                    ) from exc
 
             if self._embeddings_np is None and self.metadata:
-                logger.warning("Metadata exists but embedding matrix is missing; clearing stale metadata")
-                self.metadata = []
-                self._next_id = 0
+                raise RuntimeError(
+                    "Metadata exists but the persisted embedding matrix is missing"
+                )
 
     def get_stats(self) -> Dict:
         if self._backend == "faiss":

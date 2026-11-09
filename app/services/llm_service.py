@@ -7,7 +7,6 @@ using large language models, with support for:
 - API-based models (Gemini, OpenAI)
 """
 
-from typing import Optional, Union
 import logging
 import re
 import time
@@ -30,11 +29,16 @@ class LLMService:
 
     LLM_QUOTA_EXCEEDED = "__LLM_QUOTA_EXCEEDED__"
     LLM_API_UNAVAILABLE = "__LLM_API_UNAVAILABLE__"
+    LLM_AUTHENTICATION_FAILED = "__LLM_AUTHENTICATION_FAILED__"
+    LLM_BILLING_FAILED = "__LLM_BILLING_FAILED__"
+    LLM_MODEL_UNAVAILABLE = "__LLM_MODEL_UNAVAILABLE__"
+    LLM_NETWORK_FAILED = "__LLM_NETWORK_FAILED__"
     
     def __init__(
         self,
-        model: str = "gemini-2.0-flash",
+        model: str = "gpt-4.1-mini",
         api_key: str = "",
+        provider: str | None = None,
         temperature: float = 0.3,
         max_tokens: int = 2048,
         max_length: int = 512,
@@ -56,13 +60,14 @@ class LLMService:
         """
         self.model = model
         self.api_key = api_key
+        self.provider = (provider or self._provider_from_model(model)).lower()
         self.temperature = temperature
         self.max_tokens = max_tokens
         self.max_length = max_length
         self.max_new_tokens = max_new_tokens
         
         self._client = None
-        self._is_api = model.startswith(("gemini", "gpt", "claude", "openai"))
+        self._is_api = self.provider in {"openai", "gemini"}
         self._quota_backoff_until_ts = 0.0
         
         if self._is_api:
@@ -77,7 +82,7 @@ class LLMService:
             self._client = None
             return
         
-        if "gemini" in self.model.lower():
+        if self.provider == "gemini":
             try:
                 import google.generativeai as genai
                 genai.configure(api_key=self.api_key)
@@ -86,10 +91,10 @@ class LLMService:
             except ImportError:
                 logger.error("google-generativeai not installed")
                 self._client = None
-        elif "gpt" in self.model.lower() or "openai" in self.model.lower():
+        elif self.provider == "openai":
             try:
                 from openai import OpenAI
-                self._client = OpenAI(api_key=self.api_key)
+                self._client = OpenAI(api_key=self.api_key, timeout=30.0, max_retries=0)
                 logger.info(f"Initialized OpenAI client for {self.model}")
             except ImportError:
                 logger.error("openai not installed")
@@ -198,18 +203,47 @@ class LLMService:
             return self.LLM_QUOTA_EXCEEDED
         
         try:
-            if "gemini" in self.model.lower():
+            if self.provider == "gemini":
                 return self._generate_gemini(prompt)
-            elif "gpt" in self.model.lower():
+            elif self.provider == "openai":
                 return self._generate_openai(prompt)
             else:
                 return self.LLM_API_UNAVAILABLE
-        except Exception as e:
-            logger.error(f"API generation error: {str(e)}")
-            if self._is_quota_or_rate_limit_error(str(e)):
-                self._activate_quota_backoff(str(e))
+        except Exception as exc:
+            error_text = str(exc)
+            status_code = getattr(exc, "status_code", None)
+            logger.error(
+                "LLM request failed provider=%s model=%s error_type=%s status=%s",
+                self.provider,
+                self.model,
+                type(exc).__name__,
+                status_code,
+            )
+            if self._is_quota_or_rate_limit_error(error_text):
+                self._activate_quota_backoff(error_text)
                 return self.LLM_QUOTA_EXCEEDED
-            return f"Error generating response: {str(e)}"
+            if status_code in {401, 403}:
+                return self.LLM_AUTHENTICATION_FAILED
+            if status_code in {402} or any(
+                phrase in error_text.lower() for phrase in ("billing", "insufficient_quota", "payment")
+            ):
+                return self.LLM_BILLING_FAILED
+            if status_code == 404 or "model" in error_text.lower() and "not found" in error_text.lower():
+                return self.LLM_MODEL_UNAVAILABLE
+            if isinstance(exc, (TimeoutError, ConnectionError)) or any(
+                phrase in error_text.lower() for phrase in ("timed out", "connection", "dns")
+            ):
+                return self.LLM_NETWORK_FAILED
+            return self.LLM_API_UNAVAILABLE
+
+    @staticmethod
+    def _provider_from_model(model: str) -> str:
+        lowered = model.lower()
+        if "gemini" in lowered:
+            return "gemini"
+        if "gpt" in lowered or "openai" in lowered:
+            return "openai"
+        return "local"
     
     def _generate_gemini(self, prompt: str) -> str:
         """Generate using Gemini API."""
@@ -236,9 +270,10 @@ class LLMService:
         response = self._client.chat.completions.create(
             model=self.model,
             messages=[{"role": "user", "content": prompt}],
-                temperature=self.temperature,
-            max_tokens=self.max_tokens
-            )
+            temperature=self.temperature,
+            max_tokens=self.max_tokens,
+            timeout=30.0,
+        )
         content = response.choices[0].message.content
         if not content:
             raise RuntimeError("OpenAI returned an empty response")
@@ -281,6 +316,3 @@ class LLMService:
         except Exception as e:
             logger.error(f"Local generation error: {str(e)}")
             raise RuntimeError(f"Failed to generate text: {str(e)}") from e
-
-
-

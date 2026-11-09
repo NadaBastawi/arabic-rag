@@ -115,8 +115,8 @@ class ArabicReRanker:
                 position_bonus = 0.05 * (3 - idx)
                 combined_score += position_bonus
             
-            reranked.append({
-                'text': text,
+            reranked_doc = dict(doc)
+            reranked_doc.update({
                 'score': float(combined_score),
                 'semantic_score': float(semantic_score),
                 'lexical_score': float(lexical_score),
@@ -125,6 +125,7 @@ class ArabicReRanker:
                 'ngram_score': float(ngram_score),
                 'exact_match': float(exact_match)
             })
+            reranked.append(reranked_doc)
         
         reranked.sort(key=lambda x: x['score'], reverse=True)
         
@@ -190,7 +191,8 @@ class MultiStageRetriever:
     def retrieve(
         self,
         query: str,
-        top_k: int = 5
+        top_k: int = 5,
+        workspace_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve relevant documents using multi-stage approach.
@@ -204,10 +206,12 @@ class MultiStageRetriever:
         """
         query_embedding = self.embedding_service.embed(query)
         
-        candidates = self.vector_store.search(
-            query_embedding,
-            top_k=self.initial_top_k
-        )
+        if workspace_id is None:
+            candidates = self.vector_store.search(query_embedding, top_k=self.initial_top_k)
+        else:
+            candidates = self.vector_store.search(
+                query_embedding, top_k=self.initial_top_k, workspace_id=workspace_id
+            )
         
         if not candidates:
             return []
@@ -219,7 +223,8 @@ class MultiStageRetriever:
     def retrieve_with_stages(
         self,
         query: str,
-        top_k: int = 5
+        top_k: int = 5,
+        workspace_id: Optional[str] = None,
     ) -> Dict[str, List[Dict]]:
         """
         Retrieve documents and return results from each stage.
@@ -233,10 +238,14 @@ class MultiStageRetriever:
         """
         query_embedding = self.embedding_service.embed(query)
         
-        stage1_results = self.vector_store.search(
-            query_embedding,
-            top_k=self.initial_top_k
-        )
+        if workspace_id is None:
+            stage1_results = self.vector_store.search(
+                query_embedding, top_k=self.initial_top_k
+            )
+        else:
+            stage1_results = self.vector_store.search(
+                query_embedding, top_k=self.initial_top_k, workspace_id=workspace_id
+            )
         
         stage2_results = self.reranker.rerank(
             query,
@@ -320,7 +329,8 @@ class AdaptiveRetrieval:
     def retrieve(
         self,
         query: str,
-        top_k: int = 5
+        top_k: int = 5,
+        workspace_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve with adaptive strategy selection.
@@ -348,4 +358,4 @@ class AdaptiveRetrieval:
             reranker=adaptive_reranker
         )
         
-        return retriever.retrieve(query, top_k)
+        return retriever.retrieve(query, top_k, workspace_id=workspace_id)

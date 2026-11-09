@@ -30,20 +30,27 @@ class ArabicRAGChatbot:
     """Simple chatbot wrapper for Arabic RAG."""
 
     def __init__(self):
+        config.validate_llm()
         self.embedding_service = EmbeddingService(
             model_name=config.EMBEDDING_MODEL,
             device=config.EMBEDDING_DEVICE,
+            allow_fallback=config.ALLOW_EMBEDDING_FALLBACK,
         )
         self.llm_service = LLMService(
+            provider=config.LLM_PROVIDER,
             model=config.LLM_MODEL,
-            api_key=config.LLM_API_KEY,
+            api_key=config.effective_llm_api_key,
             temperature=config.LLM_TEMPERATURE,
             max_tokens=config.LLM_MAX_TOKENS,
         )
-        self.vector_store = FAISSVectorStore(index_path=config.INDEX_PATH)
+        self.vector_store = FAISSVectorStore(
+            index_path=config.INDEX_PATH,
+            embedding_model=config.EMBEDDING_MODEL,
+            schema_version=config.INDEX_SCHEMA_VERSION,
+        )
         self.vector_store.ensure_embedding_dimension(
             self.embedding_service.get_embedding_dimension(),
-            reset_on_mismatch=True,
+            reset_on_mismatch=False,
         )
         self.document_loader = DocumentLoader(chunk_size=500, chunk_overlap=50)
         self.document_registry: Dict[str, Dict[str, Any]] = {}
@@ -166,6 +173,14 @@ class ArabicRAGChatbot:
                 embeddings=embeddings,
                 document_ids=[doc_id] * len(chunks),
                 sources=sources,
+                metadata_list=[
+                    {
+                        "chunk_id": chunk.chunk_id,
+                        "page_num": chunk.page_num,
+                        **chunk.metadata,
+                    }
+                    for chunk in chunks
+                ],
             )
 
             self.document_registry[doc_id] = {

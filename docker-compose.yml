@@ -4,12 +4,14 @@ services:
   arabic-rag:
     build: .
     ports:
-      - "8000:8000"      # FastAPI server port
-      - "7860:7860"      # Gradio UI port
+      - "8000:8000"      # Authenticated FastAPI + HTML UI
     environment:
       - EMBEDDING_MODEL=intfloat/multilingual-e5-large
       - EMBEDDING_DEVICE=cpu
-      - LLM_MODEL=gemini-2.0-flash
+      - LLM_PROVIDER=${LLM_PROVIDER:-openai}
+      - LLM_MODEL=${LLM_MODEL:-gpt-4.1-mini}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
       - LLM_API_KEY=${LLM_API_KEY}
       - LLM_TEMPERATURE=0.3
       - LLM_MAX_TOKENS=2048
@@ -22,12 +24,16 @@ services:
       - API_PORT=8000
       - GRADIO_PORT=7860
       - GRADIO_SHARE=false
+      - AUTH_ENABLED=true
+      - AUTH_TOKEN=${AUTH_TOKEN}
+      - AUTH_WORKSPACE_ID=${AUTH_WORKSPACE_ID:-codespace-user}
+      - MAX_UPLOAD_BYTES=26214400
     volumes:
       - ./data:/app/data
       - ./logs:/app/logs
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
       interval: 30s
       timeout: 10s
       retries: 3

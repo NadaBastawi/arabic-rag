@@ -1,149 +1,99 @@
-"""
-FastAPI application for Arabic RAG system.
+"""Primary FastAPI application for the Arabic RAG service.
 
-Provides REST API endpoints for:
-- Health check
-- Document indexing
-- Query answering
-- Retrieval evaluation
+Production and staging use bearer authentication. Tokenless access is limited
+to an explicitly enabled private development environment.
 """
 
-from typing import List, Optional
-from fastapi import FastAPI, HTTPException, File, UploadFile
-from fastapi.responses import FileResponse # Import FileResponse
-from fastapi.staticfiles import StaticFiles # Import StaticFiles
-from pydantic import BaseModel, Field
-from contextlib import asynccontextmanager
+from __future__ import annotations
+
+import hashlib
+import hmac
 import logging
 import os
 import re
 import tempfile
+import uuid
+from contextlib import asynccontextmanager
+from pathlib import Path
+from typing import Any, Optional
+
+from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel, Field
 
 from app.config import config
 from app.services.embedding_service import EmbeddingService
-from app.services.llm_service import LLMService
 from app.services.faiss_store import FAISSVectorStore
+from app.services.llm_service import LLMService
 from app.services.rag_pipeline import RAGPipeline
-from app.services.multi_stage_retrieval import ArabicReRanker, MultiStageRetriever, AdaptiveRetrieval
-from app.services.cache import EmbeddingCache, QueryResultCache
 from app.utils.document_loader import DocumentLoader
-from app.utils.errors import InputValidator, ErrorHandler, ValidationError, DocumentError
-from app.utils.logging_config import setup_system_logging
+from app.utils.errors import InputValidator, ValidationError
 
-# Setup logging
-os.makedirs("./logs", exist_ok=True)
-setup_system_logging(log_dir="./logs", level=config.LOG_LEVEL, console=True)
 logger = logging.getLogger(__name__)
 
 embedding_service: Optional[EmbeddingService] = None
 llm_service: Optional[LLMService] = None
 vector_store: Optional[FAISSVectorStore] = None
 rag_pipeline: Optional[RAGPipeline] = None
-embedding_cache: Optional[EmbeddingCache] = None
-query_cache: Optional[QueryResultCache] = None
 document_loader: Optional[DocumentLoader] = None
-document_registry: dict = {}  # Maps document_id to metadata
+
+security = HTTPBearer(auto_error=False)
+ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
 
 
-def _build_reranker() -> ArabicReRanker:
-    """Create re-ranker from configured weights with safe defaults."""
-    weights = config.RE_RANKER_WEIGHTS
-    return ArabicReRanker(
-        semantic_weight=weights.get("semantic", 0.30),
-        lexical_weight=weights.get("lexical", 0.20),
-        root_weight=weights.get("root", 0.15),
-        bm25_weight=weights.get("bm25", 0.15),
-        ngram_weight=weights.get("ngram", 0.10),
-        exact_match_weight=weights.get("exact_match", 0.10),
-    )
+class IndexRequest(BaseModel):
+    texts: list[str] = Field(..., min_length=1, max_length=100)
 
 
-def _query_terms(text: str) -> set[str]:
-    tokens = re.findall(r"[\w\u0600-\u06FF]+", (text or "").lower(), flags=re.UNICODE)
-    return {token for token in tokens if len(token) >= 3}
+class AddDocumentRequest(BaseModel):
+    text: str
+    document_id: Optional[str] = None
+    source: str = "api"
+    metadata: dict[str, Any] = Field(default_factory=dict)
 
 
-def _clean_snippet(text: str) -> str:
-    cleaned = text or ""
-    cleaned = re.sub(r"https?://\S+|www\.\S+", " ", cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\b\S*[\\/]\S*\b", " ", cleaned)
-    cleaned = re.sub(r"\b[^\s]{20,}\b", " ", cleaned)
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-    return cleaned
+class QueryRequest(BaseModel):
+    question: str
+    top_k: int = Field(default=5, ge=1, le=20)
+    retrieval_mode: Optional[str] = None
 
 
-def _build_retrieval_fallback_answer(question: str, retrieved_docs: List[dict], reason: str) -> str:
-    """Return a retrieval-only answer when LLM generation is unavailable."""
-    if not retrieved_docs:
-        return (
-            f"{reason}\n\n"
-            "No relevant passages were found in the indexed documents for this question."
-        )
-
-    terms = _query_terms(question)
-    candidates = []
-    seen = set()
-
-    for doc in retrieved_docs:
-        snippet = _clean_snippet(doc.get("text", "") or "")
-        if len(snippet) < 40:
-            continue
-
-        dedupe_key = snippet[:180]
-        if dedupe_key in seen:
-            continue
-        seen.add(dedupe_key)
-
-        overlap = len(terms.intersection(_query_terms(snippet))) if terms else 0
-        score = float(doc.get("score", 0.0))
-        candidates.append({"snippet": snippet, "overlap": overlap, "score": score})
-
-    if not candidates:
-        return f"{reason}\n\nNo clean passages were extracted from the retrieved chunks."
-
-    candidates.sort(key=lambda item: (item["overlap"], item["score"]), reverse=True)
-
-    lines = [reason, "", "Quick evidence from your docs:"]
-    for idx, item in enumerate(candidates[:2], 1):
-        lines.append(f"{idx}. {item['snippet'][:180]}")
-    return "\n".join(lines)
+class DocumentInfo(BaseModel):
+    document_id: str
+    source: str
+    chunk_count: int
+    added_at: str
 
 
-def get_services():
-    """Initialize and return all services."""
-    global embedding_service, llm_service, vector_store, rag_pipeline, embedding_cache, query_cache, document_loader
-    
+def _services() -> tuple[EmbeddingService, LLMService, FAISSVectorStore, RAGPipeline]:
+    global embedding_service, llm_service, vector_store, rag_pipeline, document_loader
     if embedding_service is None:
-        logger.info(f"Loading embedding model: {config.EMBEDDING_MODEL}")
         embedding_service = EmbeddingService(
             model_name=config.EMBEDDING_MODEL,
-            device=config.EMBEDDING_DEVICE
+            device=config.EMBEDDING_DEVICE,
+            allow_fallback=config.ALLOW_EMBEDDING_FALLBACK,
         )
-    
     if llm_service is None:
-        logger.info(f"Initializing LLM service: {config.LLM_MODEL}")
         llm_service = LLMService(
+            provider=config.LLM_PROVIDER,
             model=config.LLM_MODEL,
-            api_key=config.LLM_API_KEY,
+            api_key=config.effective_llm_api_key,
             temperature=config.LLM_TEMPERATURE,
-            max_tokens=config.LLM_MAX_TOKENS
+            max_tokens=config.LLM_MAX_TOKENS,
         )
-    
     if vector_store is None:
-        logger.info(f"Initializing persistent FAISS store: {config.INDEX_PATH}")
-        vector_store = FAISSVectorStore(index_path=config.INDEX_PATH)
-        expected_dim = embedding_service.get_embedding_dimension()
-        vector_store.ensure_embedding_dimension(expected_dim, reset_on_mismatch=True)
-    
-    if embedding_cache is None:
-        embedding_cache = EmbeddingCache(max_size=10000, ttl_hours=24)
-    
-    if query_cache is None:
-        query_cache = QueryResultCache(max_size=1000, ttl_hours=6)
-    
+        vector_store = FAISSVectorStore(
+            index_path=config.INDEX_PATH,
+            embedding_model=config.EMBEDDING_MODEL,
+            schema_version=config.INDEX_SCHEMA_VERSION,
+        )
+        vector_store.ensure_embedding_dimension(
+            embedding_service.get_embedding_dimension(), reset_on_mismatch=False
+        )
     if document_loader is None:
         document_loader = DocumentLoader(chunk_size=500, chunk_overlap=50)
-    
     if rag_pipeline is None:
         rag_pipeline = RAGPipeline(
             embedding_service=embedding_service,
@@ -152,570 +102,317 @@ def get_services():
             top_k=config.RETRIEVAL_TOP_K,
             retrieval_mode=config.RETRIEVAL_MODE,
             initial_top_k=config.RETRIEVAL_INITIAL_K,
-            use_adaptive=config.USE_ADAPTIVE
+            use_adaptive=config.USE_ADAPTIVE,
         )
-    
     return embedding_service, llm_service, vector_store, rag_pipeline
 
 
+def get_services() -> tuple[EmbeddingService, LLMService, FAISSVectorStore, RAGPipeline]:
+    """Backward-compatible service factory used by integrations and tests."""
+    return _services()
+
+
+def _current_workspace(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials | None = Depends(security),
+) -> str:
+    """Authenticate a request and return its isolated workspace.
+
+    An empty token is never accepted when authentication is enabled.  This
+    avoids silently running a production deployment without an auth boundary.
+    """
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", config.AUTH_WORKSPACE_ID):
+        raise HTTPException(status_code=500, detail="Authentication workspace is misconfigured")
+    if config.LOCAL_DEV_MODE and config.PRIVATE_DEV_MODE:
+        return config.AUTH_WORKSPACE_ID
+    if not config.AUTH_ENABLED:
+        return config.AUTH_WORKSPACE_ID
+    if not config.AUTH_TOKEN:
+        raise HTTPException(
+            status_code=503,
+            detail="Authentication is not configured",
+        )
+    if not credentials or credentials.scheme.lower() != "bearer":
+        raise HTTPException(status_code=401, detail="Authentication required")
+    supplied = credentials.credentials.encode("utf-8")
+    expected = config.AUTH_TOKEN.encode("utf-8")
+    if not hmac.compare_digest(
+        hashlib.sha256(supplied).digest(), hashlib.sha256(expected).digest()
+    ):
+        raise HTTPException(status_code=401, detail="Invalid authentication credentials")
+    return config.AUTH_WORKSPACE_ID
+
+
+def _safe_source(filename: str) -> str:
+    name = Path(filename or "upload").name
+    if name in {".", ".."} or not name:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    return name
+
+
+def _registry(workspace_id: str) -> dict[str, DocumentInfo]:
+    assert vector_store is not None
+    grouped: dict[str, DocumentInfo] = {}
+    for item in vector_store.metadata:
+        if item.get("workspace_id") != workspace_id:
+            continue
+        doc_id = str(item.get("document_id", ""))
+        if not doc_id:
+            continue
+        if doc_id not in grouped:
+            grouped[doc_id] = DocumentInfo(
+                document_id=doc_id,
+                source=str(item.get("source", "unknown")),
+                chunk_count=0,
+                added_at=str(item.get("added_at", "")),
+            )
+        grouped[doc_id].chunk_count += 1
+    return grouped
+
+
 @asynccontextmanager
-async def lifespan(app: FastAPI):
-    """Application lifespan manager."""
-    logger.info("Starting Arabic RAG API...")
+async def lifespan(_: FastAPI):
+    logger.info("Starting Arabic RAG API")
     get_services()
-    logger.info("Arabic RAG API ready")
     yield
-    logger.info("Shutting down Arabic RAG API...")
+    logger.info("Shutting down Arabic RAG API")
 
 
-app = FastAPI(
-    title="Arabic RAG API",
-    description="Multi-stage retrieval system for Arabic RAG",
-    version="1.0.0",
-    lifespan=lifespan
-)
+app = FastAPI(title="Arabic RAG API", version="2.0.0", lifespan=lifespan)
+if Path("static").is_dir():
+    app.mount("/static", StaticFiles(directory="static"), name="static")
 
-# Mount static files for the UI
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
-async def serve_index():
-    """Serve the main HTML page."""
+async def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
-class IndexRequest(BaseModel):
-    """Request model for document indexing."""
-    texts: List[str] = Field(..., description="List of Arabic documents to index")
-    batch_size: int = Field(default=32, description="Batch size for embedding generation")
+@app.get("/documents/{document_id}/file")
+async def document_file(
+    document_id: str,
+    workspace_id: str = Depends(_current_workspace),
+) -> FileResponse:
+    """Serve an uploaded source file only to its authenticated workspace."""
+    _, _, _, _ = get_services()
+    try:
+        InputValidator.validate_document_id(document_id)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    matches = [
+        item for item in vector_store.metadata
+        if item.get("document_id") == document_id
+        and item.get("workspace_id") == workspace_id
+    ] if vector_store else []
+    if not matches:
+        raise HTTPException(status_code=404, detail="Document not found")
+    source = str(matches[0].get("source", ""))
+    suffix = Path(source).suffix.lower()
+    target = Path(config.DOCS_PATH, workspace_id, f"{document_id}{suffix}")
+    if not target.is_file():
+        raise HTTPException(status_code=404, detail="Document file is unavailable")
+    return FileResponse(target, media_type="application/pdf" if suffix == ".pdf" else None)
 
 
-class AddDocumentRequest(BaseModel):
-    """Request model for adding a document."""
-    text: str = Field(..., description="Document text")
-    document_id: str = Field(..., description="Unique document identifier")
-    source: Optional[str] = Field(default="api", description="Document source")
-    metadata: Optional[dict] = Field(default=None, description="Additional metadata")
-
-
-class DeleteDocumentRequest(BaseModel):
-    """Request model for deleting a document."""
-    document_id: str = Field(..., description="Document ID to delete")
-
-
-class DocumentInfo(BaseModel):
-    """Model for document information."""
-    document_id: str
-    source: str
-    chunk_count: int
-    added_at: str
-
-
-class DocumentListResponse(BaseModel):
-    """Response model for listing documents."""
-    documents: List[DocumentInfo]
-    total_count: int
-
-
-class IndexResponse(BaseModel):
-    """Response model for indexing."""
-    indexed_count: int
-    total_documents: int
-    message: str
-
-
-class QueryRequest(BaseModel):
-    """Request model for query answering."""
-    question: str = Field(..., description="Arabic question to answer")
-    retrieval_mode: Optional[str] = Field(default=None, description="Override retrieval mode")
-    top_k: Optional[int] = Field(default=None, description="Override top_k")
-
-
-class QueryResponse(BaseModel):
-    """Response model for query answering."""
-    answer: str
-    retrieved_documents: List[dict]
-    retrieval_mode: str
-
-
-class RetrieveRequest(BaseModel):
-    """Request model for retrieval only."""
-    query: str = Field(..., description="Query text")
-    top_k: int = Field(default=5, description="Number of documents to retrieve")
-    retrieval_mode: Optional[str] = Field(default=None, description="Override retrieval mode")
-
-
-class RetrieveResponse(BaseModel):
-    """Response model for retrieval."""
-    documents: List[dict]
-    retrieval_mode: str
-
-
-class ScoreRequest(BaseModel):
-    """Request model for getting detailed scores."""
-    query: str = Field(..., description="Query text")
-    top_k: int = Field(default=5, description="Number of documents")
-
-
-class ScoreResponse(BaseModel):
-    """Response model for detailed scores."""
-    documents: List[dict]
 @app.get("/health")
-async def health():
-    """Health check endpoint."""
-    return {
-        "status": "healthy",
-        "embedding_model": config.EMBEDDING_MODEL,
-        "llm_model": config.LLM_MODEL,
-        "retrieval_mode": config.RETRIEVAL_MODE
-    }
+async def health() -> dict[str, str]:
+    return {"status": "ok"}
 
 
-@app.post("/index", response_model=IndexResponse)
-async def index_documents(request: IndexRequest):
-    """
-    Index Arabic documents into the vector store.
-    
-    Args:
-        request: IndexRequest with texts and batch_size
-        
-    Returns:
-        IndexResponse with indexed count
-    """
-    try:
-        embed_svc, _, vs, _ = get_services()
-        
-        texts = request.texts
-        total = len(texts)
-        
-        logger.info(f"Indexing {total} documents...")
-        
-        embeddings = embed_svc.embed(texts)
-        vs.add_documents(texts=texts, embeddings=embeddings)
-        
-        logger.info(f"Successfully indexed {total} documents")
-        
-        return IndexResponse(
-            indexed_count=total,
-            total_documents=vs.get_stats().get("total_documents", total),
-            message=f"Successfully indexed {total} documents"
-        )
-        
-    except Exception as e:
-        logger.error(f"Indexing error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/query", response_model=QueryResponse)
-async def query(request: QueryRequest):
-    """
-    Answer a question using the RAG pipeline.
-    
-    Args:
-        request: QueryRequest with question, optional retrieval_mode and top_k
-        
-    Returns:
-        QueryResponse with answer and retrieved documents
-    """
-    try:
-        embed_svc, llm_svc, vs, pipeline = get_services()
-
-        question = request.question.strip() if request.question else ""
-        if not question:
-            raise ValueError("Question must be a non-empty string")
-
-        retrieval_mode = request.retrieval_mode or pipeline.retrieval_mode
-        top_k = request.top_k or pipeline.top_k
-        use_fast_retrieval = (
-            retrieval_mode == "multi_stage"
-            and llm_svc.is_quota_backoff_active()
-        )
-
-        if retrieval_mode == "multi_stage" and not use_fast_retrieval:
-            if config.USE_ADAPTIVE:
-                retriever = AdaptiveRetrieval(embed_svc, vs)
-            else:
-                retriever = MultiStageRetriever(
-                    embed_svc,
-                    vs,
-                    initial_top_k=config.RETRIEVAL_INITIAL_K,
-                    reranker=_build_reranker()
-                )
-            retrieved_docs = retriever.retrieve(question, top_k=top_k)
-        else:
-            q_emb = embed_svc.embed(question)
-            retrieved_docs = vs.search(q_emb, top_k=min(top_k, 3))
-
-        if not retrieved_docs:
-            context = "لا توجد معلومات متاحة في قاعدة المعرفة."
-        else:
-            context = "\n\n".join(
-                f"المستند {idx + 1}: {doc.get('text', '')}"
-                for idx, doc in enumerate(retrieved_docs)
-            )
-
-        prompt = pipeline._construct_prompt(question, context)
-        answer = llm_svc.generate(prompt)
-        if answer == LLMService.LLM_QUOTA_EXCEEDED:
-            answer = _build_retrieval_fallback_answer(
-                question,
-                retrieved_docs,
-                "LLM quota/rate limit reached, so I am returning a quick extract from your documents.",
-            )
-        elif answer == LLMService.LLM_API_UNAVAILABLE:
-            answer = _build_retrieval_fallback_answer(
-                question,
-                retrieved_docs,
-                "LLM API is unavailable or API key is missing, so I am returning a quick extract from your documents.",
-            )
-        elif answer.startswith("Error generating response:"):
-            answer = _build_retrieval_fallback_answer(
-                question,
-                retrieved_docs,
-                "LLM generation failed, so I am returning a quick extract from your documents.",
-            )
-
-        return QueryResponse(
-            answer=answer,
-            retrieved_documents=retrieved_docs,
-            retrieval_mode=retrieval_mode
-        )
-        
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        logger.error(f"Query error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/retrieve", response_model=RetrieveResponse)
-async def retrieve(request: RetrieveRequest):
-    """
-    Retrieve relevant documents without generating answer.
-    
-    Args:
-        request: RetrieveRequest with query and top_k
-        
-    Returns:
-        RetrieveResponse with retrieved documents
-    """
-    try:
-        embed_svc, _, vs, _ = get_services()
-        
-        retrieval_mode = request.retrieval_mode or config.RETRIEVAL_MODE
-        
-        if retrieval_mode == "multi_stage":
-            if config.USE_ADAPTIVE:
-                retriever = AdaptiveRetrieval(embed_svc, vs)
-            else:
-                reranker = _build_reranker()
-                retriever = MultiStageRetriever(
-                    embed_svc, vs,
-                    reranker=reranker
-                )
-            documents = retriever.retrieve(request.query, top_k=request.top_k)
-        else:
-            q_emb = embed_svc.embed(request.query)
-            documents = vs.search(q_emb, top_k=request.top_k)
-        
-        return RetrieveResponse(
-            documents=documents,
-            retrieval_mode=retrieval_mode
-        )
-        
-    except Exception as e:
-        logger.error(f"Retrieve error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/scores", response_model=ScoreResponse)
-async def get_scores(request: ScoreRequest):
-    """
-    Get detailed score breakdown for retrieval.
-    
-    Only works with multi_stage retrieval mode.
-    
-    Args:
-        request: ScoreRequest with query and top_k
-        
-    Returns:
-        ScoreResponse with detailed scores
-    """
-    try:
-        _, _, _, pipeline = get_services()
-        
-        if pipeline.retrieval_mode != "multi_stage":
-            raise HTTPException(
-                status_code=400,
-                detail="Score endpoint requires multi_stage retrieval mode"
-            )
-        
-        documents = pipeline.retrieve_with_scores(request.query)
-        
-        return ScoreResponse(documents=documents[:request.top_k])
-        
-    except HTTPException:
-        raise
-    except Exception as e:
-        logger.error(f"Scores error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/config")
-async def get_config():
-    """Get current configuration (non-sensitive values)."""
-    return {
-        "embedding_model": config.EMBEDDING_MODEL,
-        "llm_model": config.LLM_MODEL,
-        "retrieval_mode": config.RETRIEVAL_MODE,
-        "use_adaptive": config.USE_ADAPTIVE,
-        "re_ranker_weights": config.RE_RANKER_WEIGHTS,
-        "top_k": config.RETRIEVAL_TOP_K,
-        "initial_k": config.RETRIEVAL_INITIAL_K
-    }
+@app.post("/index")
+async def index_texts(
+    request: IndexRequest,
+    workspace_id: str = Depends(_current_workspace),
+) -> dict[str, Any]:
+    embedder, _, store, _ = get_services()
+    texts = [InputValidator.validate_document(text) for text in request.texts]
+    ids = [f"doc-{uuid.uuid4().hex}" for _ in texts]
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    store.add_documents(
+        texts,
+        embedder.embed(texts),
+        document_ids=ids,
+        sources=["api"] * len(texts),
+        metadata_list=[{"workspace_id": workspace_id, "added_at": now} for _ in texts],
+    )
+    return {"indexed_count": len(texts), "total_documents": len(_registry(workspace_id))}
 
 
 @app.post("/documents/add")
-async def add_document(request: AddDocumentRequest):
-    """
-    Add a single document to the index.
-    
-    Args:
-        request: AddDocumentRequest with document text and metadata
-        
-    Returns:
-        Success message with document ID
-    """
-    try:
-        # Validate input
-        text = InputValidator.validate_document(request.text)
-        doc_id = InputValidator.validate_document_id(request.document_id)
-        
-        embed_svc, _, vs, _ = get_services()
-        
-        # Generate embedding
-        embedding = embed_svc.embed(text)
-        
-        # Add to vector store
-        vs.add_documents(
-            texts=[text],
-            embeddings=[embedding],
-            document_ids=[doc_id],
-            sources=[request.source],
-            metadata_list=[request.metadata or {}]
-        )
-        
-        # Update document registry
-        from datetime import datetime
-        document_registry[doc_id] = {
-            "source": request.source,
-            "added_at": datetime.now().isoformat(),
-            "chunk_count": 1
-        }
-        
-        logger.info(f"Added document: {doc_id}")
-        
-        return {
-            "status": "success",
-            "document_id": doc_id,
-            "message": f"Document {doc_id} added successfully"
-        }
-        
-    except ValidationError as e:
-        raise HTTPException(status_code=422, detail=str(e))
-    except Exception as e:
-        error_resp = ErrorHandler.handle_api_error(e, "/documents/add")
-        raise HTTPException(status_code=error_resp["status_code"], detail=error_resp["message"])
+async def add_document(
+    request: AddDocumentRequest,
+    workspace_id: str = Depends(_current_workspace),
+) -> dict[str, Any]:
+    embedder, _, store, _ = get_services()
+    text = InputValidator.validate_document(request.text)
+    requested_id = request.document_id.strip() if request.document_id else ""
+    document_id = requested_id or f"doc-{uuid.uuid4().hex}"
+    if requested_id:
+        try:
+            InputValidator.validate_document_id(requested_id)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        if requested_id in _registry(workspace_id):
+            raise HTTPException(status_code=409, detail="Document ID already exists")
+    now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+    metadata = dict(request.metadata)
+    metadata.update({"workspace_id": workspace_id, "added_at": now})
+    store.add_documents(
+        [text], embedder.embed([text]), [document_id], [Path(request.source).name], [metadata]
+    )
+    return {"document_id": document_id, "chunk_count": 1}
 
 
 @app.post("/documents/upload")
-async def upload_document(file: UploadFile = File(...)):
-    """
-    Upload and index a PDF or text document.
-    
-    Args:
-        file: PDF or text file to upload
-        
-    Returns:
-        Success message with chunk count
-    """
-    try:
-        embed_svc, _, vs, _ = get_services()
-        loader = document_loader
-        
-        # Save temporary file
-        with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(file.filename)[1]) as tmp:
-            content = await file.read()
-            tmp.write(content)
-            tmp_path = tmp.name
-        
-        try:
-            # Load and chunk document
-            chunks = loader.load_file(tmp_path)
-            
-            if not chunks:
-                raise DocumentError(f"Could not extract text from {file.filename}")
-            
-            # Generate embeddings
-            texts = [chunk.text for chunk in chunks]
-            embeddings = embed_svc.embed(texts)
-            
-            # Add to vector store
-            doc_id = os.path.splitext(file.filename)[0]
-            sources = [chunk.source for chunk in chunks]
-            
-            vs.add_documents(
-                texts=texts,
-                embeddings=embeddings,
-                document_ids=[doc_id] * len(chunks),
-                sources=sources
-            )
-            
-            # Update registry
-            from datetime import datetime
-            document_registry[doc_id] = {
-                "source": file.filename,
-                "added_at": datetime.now().isoformat(),
-                "chunk_count": len(chunks)
-            }
-            
-            logger.info(f"Uploaded document: {doc_id} with {len(chunks)} chunks")
-            
-            return {
-                "status": "success",
-                "document_id": doc_id,
-                "chunk_count": len(chunks),
-                "message": f"Document {file.filename} indexed with {len(chunks)} chunks"
-            }
-            
-        finally:
-            os.unlink(tmp_path)
-            
-    except DocumentError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        error_resp = ErrorHandler.handle_api_error(e, "/documents/upload")
-        raise HTTPException(status_code=error_resp["status_code"], detail=error_resp["message"])
+async def upload_document(
+    file: UploadFile = File(...),
+    workspace_id: str = Depends(_current_workspace),
+) -> dict[str, Any]:
+    source = _safe_source(file.filename or "")
+    suffix = Path(source).suffix.lower()
+    if suffix not in ALLOWED_EXTENSIONS:
+        raise HTTPException(status_code=415, detail="Only PDF, DOCX, and TXT files are supported")
 
+    data = bytearray()
+    while chunk := await file.read(1024 * 1024):
+        data.extend(chunk)
+        if len(data) > config.MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail="Uploaded file exceeds the size limit")
 
-@app.delete("/documents/{document_id}")
-async def delete_document(document_id: str):
-    """
-    Delete a document from the index.
-    
-    Args:
-        document_id: ID of document to delete
-        
-    Returns:
-        Success message
-    """
+    if not data:
+        raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    Path(config.DOCS_PATH, workspace_id).mkdir(parents=True, exist_ok=True)
+    document_id = uuid.uuid4().hex
+    target = Path(config.DOCS_PATH, workspace_id, f"{document_id}{suffix}")
+    target.write_bytes(data)
     try:
-        _, _, vs, _ = get_services()
-        
-        if document_id not in document_registry:
-            raise HTTPException(status_code=404, detail=f"Document {document_id} not found")
-        
-        deleted = vs.delete_document(document_id)
-        
-        if deleted:
-            del document_registry[document_id]
-            logger.info(f"Deleted document: {document_id}")
-            return {"status": "success", "message": f"Document {document_id} deleted"}
-        else:
-            raise DocumentError(f"Could not delete document {document_id}")
-            
+        chunks = document_loader.load_file(str(target)) if document_loader else []
+        if not chunks:
+            raise HTTPException(status_code=422, detail="Could not extract text from the document")
+        embedder, _, store, _ = get_services()
+        now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
+        store.add_documents(
+            [chunk.text for chunk in chunks],
+            embedder.embed([chunk.text for chunk in chunks]),
+            [document_id] * len(chunks),
+            [source] * len(chunks),
+            [
+                {
+                    "workspace_id": workspace_id,
+                    "chunk_id": chunk.chunk_id,
+                    "page_num": chunk.page_num,
+                    "added_at": now,
+                }
+                for chunk in chunks
+            ],
+        )
+        report = document_loader.last_report if document_loader else {}
+        return {
+            "document_id": document_id,
+            "source": source,
+            "chunk_count": len(chunks),
+            "extraction": {
+                "page_count": report.get("page_count"),
+                "indexed_page_count": report.get("indexed_page_count"),
+                "ocr_required_pages": report.get("ocr_required_pages", []),
+            },
+        }
     except HTTPException:
+        target.unlink(missing_ok=True)
         raise
-    except Exception as e:
-        error_resp = ErrorHandler.handle_api_error(e, f"/documents/{document_id}")
-        raise HTTPException(status_code=error_resp["status_code"], detail=error_resp["message"])
+    except Exception:
+        target.unlink(missing_ok=True)
+        logger.exception("Document upload processing failed")
+        raise HTTPException(status_code=500, detail="Document processing failed")
 
 
 @app.get("/documents")
-async def list_documents():
-    """
-    List all indexed documents.
-    
-    Returns:
-        DocumentListResponse with document list
-    """
+async def list_documents(
+    workspace_id: str = Depends(_current_workspace),
+) -> dict[str, Any]:
+    documents = list(_registry(workspace_id).values())
+    return {"documents": [item.model_dump() for item in documents], "total_count": len(documents)}
+
+
+@app.delete("/documents/{document_id}")
+async def delete_document(
+    document_id: str,
+    workspace_id: str = Depends(_current_workspace),
+) -> dict[str, Any]:
+    _, _, store, _ = get_services()
     try:
-        documents = []
-        for doc_id, info in document_registry.items():
-            documents.append({
-                "document_id": doc_id,
-                "source": info["source"],
-                "chunk_count": info["chunk_count"],
-                "added_at": info["added_at"]
-            })
-        
-        return {
-            "documents": documents,
-            "total_count": len(documents)
-        }
-        
-    except Exception as e:
-        error_resp = ErrorHandler.handle_api_error(e, "/documents")
-        raise HTTPException(status_code=error_resp["status_code"], detail=error_resp["message"])
+        InputValidator.validate_document_id(document_id)
+    except ValidationError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not store.delete_document(document_id, workspace_id=workspace_id):
+        raise HTTPException(status_code=404, detail="Document not found")
+    return {"deleted": True, "document_id": document_id}
 
 
 @app.post("/documents/clear")
-async def clear_documents():
-    """
-    Clear all indexed documents.
-    
-    Returns:
-        Success message
-    """
-    try:
-        global rag_pipeline, document_registry
+async def clear_documents(workspace_id: str = Depends(_current_workspace)) -> dict[str, Any]:
+    _, _, store, _ = get_services()
+    ids = list(_registry(workspace_id))
+    for document_id in ids:
+        store.delete_document(document_id, workspace_id=workspace_id)
+    return {"deleted_count": len(ids)}
 
-        embed_svc, llm_svc, _, _ = get_services()
 
-        # Clear vector store data and persisted artifacts, then rewire pipeline.
-        vector_store.clear()
-        vector_store.ensure_embedding_dimension(
-            embed_svc.get_embedding_dimension(),
-            reset_on_mismatch=False,
+@app.post("/query")
+async def query(
+    request: QueryRequest,
+    workspace_id: str = Depends(_current_workspace),
+) -> dict[str, Any]:
+    _, _, store, pipeline = get_services()
+    question = InputValidator.validate_query(request.question)
+    docs = []
+    if request.retrieval_mode == "basic" or not pipeline.multi_stage_retriever:
+        docs = store.search(
+            pipeline.embedding_service.embed(question),
+            top_k=request.top_k,
+            workspace_id=workspace_id,
         )
-        rag_pipeline = RAGPipeline(
-            embedding_service=embed_svc,
-            llm_service=llm_svc,
-            vector_store=vector_store,
-            top_k=config.RETRIEVAL_TOP_K,
-            retrieval_mode=config.RETRIEVAL_MODE,
-            initial_top_k=config.RETRIEVAL_INITIAL_K,
-            use_adaptive=config.USE_ADAPTIVE
+    else:
+        docs = pipeline.multi_stage_retriever.retrieve(
+            question, top_k=request.top_k, workspace_id=workspace_id
         )
-        document_registry.clear()
-        
-        logger.info("Cleared all documents")
-        
-        return {"status": "success", "message": "All documents cleared"}
-        
-    except Exception as e:
-        error_resp = ErrorHandler.handle_api_error(e, "/documents/clear")
-        raise HTTPException(status_code=error_resp["status_code"], detail=error_resp["message"])
+    if not docs:
+        return {
+            "answer": "لا توجد معلومات ذات صلة في المستندات المرفوعة.",
+            "retrieved_documents": [],
+        }
+    answer = pipeline.answer(question, workspace_id=workspace_id)
+    citations = [
+        {
+            "document_id": doc.get("document_id"),
+            "source": doc.get("source"),
+            "page_num": doc.get("metadata", {}).get("page_num"),
+            "chunk_id": doc.get("metadata", {}).get("chunk_id"),
+            "snippet": doc.get("text", "")[:240],
+            "score": doc.get("score"),
+        }
+        for doc in docs
+    ]
+    safe_docs = [
+        {
+            "text": doc.get("text", ""),
+            "document_id": doc.get("document_id"),
+            "source": doc.get("source"),
+            "score": doc.get("score"),
+            "metadata": {
+                key: value
+                for key, value in doc.get("metadata", {}).items()
+                if key not in {"workspace_id", "added_at"}
+            },
+        }
+        for doc in docs
+    ]
+    return {"answer": answer, "retrieved_documents": safe_docs, "citations": citations}
 
 
 @app.get("/stats")
-async def get_statistics():
-    """
-    Get system statistics.
-    
-    Returns:
-        Statistics about vector store and caches
-    """
-    try:
-        _, _, vs, _ = get_services()
-        
-        return {
-            "vector_store": vs.get_stats(),
-            "embedding_cache": embedding_cache.get_stats() if embedding_cache else {},
-            "query_cache": query_cache.get_stats() if query_cache else {},
-            "total_documents": len(document_registry)
-        }
-        
-    except Exception as e:
-        error_resp = ErrorHandler.handle_api_error(e, "/stats")
-        raise HTTPException(status_code=error_resp["status_code"], detail=error_resp["message"])
+async def stats(workspace_id: str = Depends(_current_workspace)) -> dict[str, Any]:
+    _, _, store, _ = get_services()
+    result = store.get_stats()
+    result["workspace_documents"] = len(_registry(workspace_id))
+    return result

@@ -1,6 +1,6 @@
 # Ar-RAG — Arabic Retrieval-Augmented Generation System
 
-An end-to-end Arabic RAG system that combines multi-stage retrieval, morphology-aware preprocessing, and LLM-powered generation to answer questions over Arabic document collections. The system handles the linguistic complexity of Arabic (root patterns, diacritics, morphological variation) through specialized preprocessing, retrieves relevant documents using FAISS vector search with learned reranking, and generates answers via Google Gemini. Packaged as a FastAPI backend with a Gradio chat interface and deployed via Docker.
+An end-to-end Arabic RAG system that combines multi-stage retrieval, morphology-aware preprocessing, and LLM-powered generation to answer questions over Arabic document collections. The default generation provider is OpenAI, with optional Gemini support.
 
 
 ## Features
@@ -12,6 +12,8 @@ An end-to-end Arabic RAG system that combines multi-stage retrieval, morphology-
 - **Gradio chat UI** — Interactive web interface for conversational document Q&A
 - **Dockerized deployment** — Single-command deployment with docker-compose
 - **Document ingestion** — Supports PDF and plain text uploads; automatic chunking and embedding
+- **Persistent index safety** — Embedding model and dimension are recorded; incompatible
+  indexes fail explicitly instead of being deleted
 
 ## Architecture
 
@@ -145,7 +147,7 @@ README.md                              # This file
 3. **Configure environment:**
    ```bash
    cp .env.example .env
-   # Edit .env and set LLM_API_KEY (Google Gemini API key)
+   # Edit .env and set OPENAI_API_KEY (or GEMINI_API_KEY when LLM_PROVIDER=gemini)
    ```
 
 4. **Run the API (Terminal 1):**
@@ -155,11 +157,46 @@ README.md                              # This file
    - API docs: http://localhost:8000/docs
    - Health check: http://localhost:8000/health
 
-5. **Run the UI (Terminal 2):**
-   ```bash
-   python -m gradio app.app
-   ```
-   - Chat UI: http://localhost:7860
+5. **Open the primary UI:** forward port `8000` privately in Codespaces and open
+   `http://localhost:8000/`. In local development, the API binds to loopback
+   and the DALIL UI does not ask for a token. Production deployments keep
+   bearer authentication enabled.
+
+### Codespaces smoke test
+
+```bash
+export AUTH_WORKSPACE_ID=codespace-user
+export ALLOW_EMBEDDING_FALLBACK=false
+export LOCAL_DEV_MODE=true
+export PRIVATE_DEV_MODE=true  # only when the forwarded port is configured Private
+uvicorn app.main:app --host 127.0.0.1 --port 8000
+```
+
+Open the privately forwarded port, upload a PDF/DOCX/TXT file, and ask
+questions whose answers are present in that document. Responses include
+document IDs, source names, page metadata, and clickable evidence links.
+Set `OPENAI_API_KEY` in the server environment for generated answers. Shell
+environment variables take precedence over `.env`; the legacy `LLM_API_KEY`
+is ignored by default and is accepted only when `LLM_LEGACY_COMPAT=true`.
+
+Check the effective provider configuration without exposing credentials:
+
+```bash
+python -m app.config
+```hat a generated answer is grounded.
+
+### Safe PDF reindex
+
+The existing index is never replaced automatically. Build a separate index
+with the configured embedding model, verify its counts and retrieval results,
+then switch `INDEX_PATH` explicitly only after approval:
+
+```bash
+python -m app.reindex_pdf \
+  --pdf "/path/to/الذكاء العاطفي.pdf" \
+  --output ./data/index-arabic-emotion-reindexed \
+  --workspace codespace-user
+```hat a generated answer is grounded.
 
 ## Quick Start — Docker
 
@@ -170,7 +207,18 @@ docker compose up --build
 - **API:** http://localhost:8000/docs
 - **Chat UI:** http://localhost:7860
 
-Ensure `.env` is in the project root with `LLM_API_KEY` set.
+Ensure `.env` is in the project root with the selected provider-specific API
+key and a strong `AUTH_TOKEN` set. Persist `./data` and `./logs`; never expose
+credentials or the token in an image or commit them.
+
+### Index and embedding safety
+
+The API and Gradio application use the same persistent index configuration. On
+startup, the active embedding model and vector dimension are checked against the
+index manifest. A mismatch fails startup without deleting existing documents.
+Set `ALLOW_EMBEDDING_FALLBACK=true` only for local tests or offline development;
+production deployments must use a real embedding model. Reindex explicitly
+after changing `EMBEDDING_MODEL` or its dimension.
 
 ## API Reference
 
@@ -203,8 +251,11 @@ All configuration is environment-based. Create a `.env` file (or copy `.env.exam
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `LLM_MODEL` | LLM model name (Gemini) | `gemini-2.0-flash` |
-| `LLM_API_KEY` | Google Gemini API key | (required) |
+| `LLM_PROVIDER` | LLM provider (`openai` or `gemini`) | `openai` |
+| `LLM_MODEL` | Provider model name | `gpt-4.1-mini` |
+| `OPENAI_API_KEY` | OpenAI API key | (required for OpenAI) |
+| `GEMINI_API_KEY` | Gemini API key | (required for Gemini) |
+| `LLM_API_KEY` | Legacy provider key fallback | optional |
 | `LLM_TEMPERATURE` | Response creativity (0–1) | `0.3` |
 | `LLM_MAX_TOKENS` | Max tokens per response | `1024` |
 | `EMBEDDING_MODEL` | Text embedding model | `intfloat/multilingual-e5-large` |

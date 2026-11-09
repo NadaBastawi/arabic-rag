@@ -71,6 +71,18 @@ def test_document_loader_chunks_text_with_overlap():
     assert all(chunk.text for chunk in chunks)
 
 
+def test_document_loader_normalizes_arabic_pdf_glyphs_and_reports_quality():
+    loader = DocumentLoader()
+
+    normalized = loader._normalize_extracted_text("اﻟﺬﻛﺎء  \t اﻟﻌﺎﻃﻔﻲ\x00")
+    assert normalized == "الذكاء العاطفي"
+
+    usable = loader._assess_page_quality("الذكاء العاطفي " * 20)
+    poor = loader._assess_page_quality("ABCDEFG262")
+    assert usable["ocr_required"] is False
+    assert poor["ocr_required"] is True
+
+
 def test_vector_store_add_search_delete_and_persist(embedding_service):
     with tempfile.TemporaryDirectory() as tmp:
         store = FAISSVectorStore(index_path=tmp)
@@ -105,6 +117,32 @@ def test_vector_store_dimension_mismatch_can_reset(embedding_service):
         assert stats["embedding_dim"] == 64
         assert stats["total_documents"] == 0
         assert stats["total_vectors"] == 0
+
+
+def test_vector_store_dimension_mismatch_does_not_delete_data_by_default(embedding_service):
+    with tempfile.TemporaryDirectory() as tmp:
+        store = FAISSVectorStore(index_path=tmp)
+        texts = ["نص محفوظ"]
+        store.add_documents(texts, embedding_service.embed(texts), document_ids=["safe-doc"])
+
+        with pytest.raises(ValueError, match="dimension mismatch"):
+            store.ensure_embedding_dimension(64)
+
+        reloaded = FAISSVectorStore(index_path=tmp)
+        assert [item["document_id"] for item in reloaded.metadata] == ["safe-doc"]
+
+
+def test_vector_store_rejects_embedding_model_change_without_deleting_data(embedding_service):
+    with tempfile.TemporaryDirectory() as tmp:
+        store = FAISSVectorStore(index_path=tmp, embedding_model="model-a")
+        store.add_documents(["نص محفوظ"], embedding_service.embed(["نص محفوظ"]))
+
+        changed_model = FAISSVectorStore(index_path=tmp, embedding_model="model-b")
+        with pytest.raises(ValueError, match="model mismatch"):
+            changed_model.ensure_embedding_dimension(embedding_service.dim)
+
+        reloaded = FAISSVectorStore(index_path=tmp, embedding_model="model-a")
+        assert len(reloaded.metadata) == 1
 
 
 def test_embedding_and_query_cache():
@@ -143,6 +181,7 @@ def api_client(monkeypatch):
         api_main.query_cache = QueryResultCache(max_size=100, ttl_hours=1)
         api_main.document_loader = loader
         api_main.document_registry = {}
+        monkeypatch.setattr(api_main.config, "AUTH_ENABLED", False)
 
         def fake_get_services():
             return emb, llm, vs, pipeline
