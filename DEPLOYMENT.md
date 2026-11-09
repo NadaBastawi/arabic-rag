@@ -62,8 +62,7 @@ export LLM_API_KEY=your-api-key-here
 docker-compose up -d
 
 # 3. Access services
-# - Gradio UI: http://localhost:7860
-# - API: http://localhost:8000
+# - Authenticated HTML UI/API: http://localhost:8000
 # - API Docs: http://localhost:8000/docs
 ```
 
@@ -206,6 +205,30 @@ curl http://localhost:8000/config
 ```
 
 **Full API Documentation:** Visit `http://localhost:8000/docs` after starting the server
+
+## Azure Container Apps staging plan (no deployment performed)
+
+1. Build the image with a pinned, reviewed dependency lock and publish it to
+   Azure Container Registry.
+2. Create a Container App with ingress restricted to internal/private access
+   for the first stage. Configure a readiness probe for `/health` on port 8000.
+3. Store `AUTH_TOKEN`, `LLM_API_KEY`, and model settings in Container Apps
+   secrets; inject them as environment variables rather than baking them into
+   the image. Replace the local token validator with Entra ID JWT validation
+   before exposing multiple tenants.
+4. Mount durable Azure Files storage for `/app/data` and `/app/logs`, or move
+   the vector/metadata layer to a managed store. A container filesystem is not
+   durable across revisions or scale-out.
+5. Set CPU/memory based on the embedding model footprint, keep minimum replicas
+   at one during staging, and cap upload/request concurrency. Enable revision
+   traffic splitting only after persistence and restart tests pass.
+6. Send structured logs to Log Analytics, disable debug logging, configure
+   alerting for restart loops, 5xx responses, and provider rate limits, and
+   validate backup/restore of the index before production.
+
+This repository is prepared for local/private Codespaces testing, not an
+Azure deployment. Real Gemini and embedding services remain external
+dependencies and require credentials and network access.
 
 ---
 

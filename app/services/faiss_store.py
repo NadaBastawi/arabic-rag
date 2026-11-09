@@ -204,7 +204,12 @@ class FAISSVectorStore:
         """Compatibility alias for older code paths."""
         self.add_documents(texts=texts, embeddings=embeddings)
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict]:
+    def search(
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 5,
+        workspace_id: Optional[str] = None,
+    ) -> List[Dict]:
         if top_k < 1:
             return []
         if not self.metadata:
@@ -228,7 +233,11 @@ class FAISSVectorStore:
             if self.index is None or self.index.ntotal == 0:
                 return []
 
-            scores, ids = self.index.search(query, min(top_k, self.index.ntotal))
+            # Search all vectors when a tenant filter is active.  Filtering
+            # after a top-k search could otherwise return too few or leak
+            # another tenant's nearest result into the ranking pipeline.
+            search_k = self.index.ntotal if workspace_id else min(top_k, self.index.ntotal)
+            scores, ids = self.index.search(query, search_k)
             score_row = scores[0]
             id_row = ids[0]
 
@@ -238,18 +247,26 @@ class FAISSVectorStore:
                 meta = metadata_by_id.get(int(idx))
                 if not meta:
                     continue
+                if workspace_id and meta.get("workspace_id") != workspace_id:
+                    continue
                 results.append(self._format_result(meta, float(score)))
+                if len(results) >= top_k:
+                    break
         else:
             if self._embeddings_np is None or len(self._embeddings_np) == 0:
                 return []
 
             scores = np.dot(self._embeddings_np, query[0])
-            top_indices = np.argsort(scores)[::-1][: min(top_k, len(scores))]
+            top_indices = np.argsort(scores)[::-1]
             metadata_sorted = sorted(self.metadata, key=lambda item: int(item["faiss_id"]))
 
             for pos in top_indices:
                 meta = metadata_sorted[int(pos)]
+                if workspace_id and meta.get("workspace_id") != workspace_id:
+                    continue
                 results.append(self._format_result(meta, float(scores[int(pos)])))
+                if len(results) >= top_k:
+                    break
 
         return results
 
@@ -264,9 +281,12 @@ class FAISSVectorStore:
             "metadata": {k: v for k, v in meta.items() if k not in excluded},
         }
 
-    def delete_document(self, document_id: str) -> bool:
+    def delete_document(self, document_id: str, workspace_id: Optional[str] = None) -> bool:
         ids_to_remove = [
-            int(item["faiss_id"]) for item in self.metadata if item.get("document_id") == document_id
+            int(item["faiss_id"])
+            for item in self.metadata
+            if item.get("document_id") == document_id
+            and (not workspace_id or item.get("workspace_id") == workspace_id)
         ]
         if not ids_to_remove:
             return False

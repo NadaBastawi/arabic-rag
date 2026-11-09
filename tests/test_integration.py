@@ -71,6 +71,18 @@ def test_document_loader_chunks_text_with_overlap():
     assert all(chunk.text for chunk in chunks)
 
 
+def test_document_loader_normalizes_arabic_pdf_glyphs_and_reports_quality():
+    loader = DocumentLoader()
+
+    normalized = loader._normalize_extracted_text("اﻟﺬﻛﺎء  \t اﻟﻌﺎﻃﻔﻲ\x00")
+    assert normalized == "الذكاء العاطفي"
+
+    usable = loader._assess_page_quality("الذكاء العاطفي " * 20)
+    poor = loader._assess_page_quality("ABCDEFG262")
+    assert usable["ocr_required"] is False
+    assert poor["ocr_required"] is True
+
+
 def test_vector_store_add_search_delete_and_persist(embedding_service):
     with tempfile.TemporaryDirectory() as tmp:
         store = FAISSVectorStore(index_path=tmp)
@@ -169,6 +181,7 @@ def api_client(monkeypatch):
         api_main.query_cache = QueryResultCache(max_size=100, ttl_hours=1)
         api_main.document_loader = loader
         api_main.document_registry = {}
+        monkeypatch.setattr(api_main.config, "AUTH_ENABLED", False)
 
         def fake_get_services():
             return emb, llm, vs, pipeline

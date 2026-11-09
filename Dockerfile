@@ -17,12 +17,11 @@ COPY . .
 # Create data directory
 RUN mkdir -p /app/data
 
-# Expose ports
-EXPOSE 8000 7860
+# Expose the authenticated primary API and HTML UI
+EXPOSE 8000
 
 # Environment variables
 ENV PYTHONUNBUFFERED=1
 ENV LOG_LEVEL=INFO
 
-# Run both API and UI
-CMD ["sh", "-c", "python -m uvicorn app.main:app --host 0.0.0.0 --port 8000 & python -m gradio app.app"]
+CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,373 +1,52 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="ar" dir="rtl">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Arabic RAG Chatbot</title>
-    <style>
-        * {
-            margin: 0;
-            padding: 0;
-            box-sizing: border-box;
-        }
-        
-        body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Helvetica Neue', sans-serif;
-            background: linear-gradient(135deg, #FFF9E6 0%, #FFFACD 100%);
-            min-height: 100vh;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-            padding: 20px;
-        }
-        
-        .container {
-            width: 100%;
-            max-width: 700px;
-            height: 90vh;
-            max-height: 800px;
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
-        
-        .header {
-            background: linear-gradient(135deg, #F4D03F 0%, #F9E79F 100%);
-            padding: 16px 20px;
-            border-bottom: 1px solid #F5D547;
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-        }
-        
-        .header-title {
-            font-size: 18px;
-            font-weight: 600;
-            color: #333;
-        }
-        
-        .chat-container {
-            flex: 1;
-            overflow-y: auto;
-            padding: 20px;
-            display: flex;
-            flex-direction: column;
-            gap: 12px;
-        }
-        
-        .message {
-            display: flex;
-            margin-bottom: 8px;
-            animation: slideIn 0.3s ease;
-        }
-        
-        @keyframes slideIn {
-            from {
-                opacity: 0;
-                transform: translateY(10px);
-            }
-            to {
-                opacity: 1;
-                transform: translateY(0);
-            }
-        }
-        
-        .message.user {
-            justify-content: flex-end;
-        }
-        
-        .message.bot {
-            justify-content: flex-start;
-        }
-        
-        .bubble {
-            max-width: 70%;
-            padding: 12px 16px;
-            border-radius: 12px;
-            line-height: 1.5;
-            word-wrap: break-word;
-            font-size: 14px;
-        }
-        
-        .message.user .bubble {
-            background: #F4D03F;
-            color: #333;
-            border-bottom-right-radius: 4px;
-            font-weight: 500;
-        }
-        
-        .message.bot .bubble {
-            background: #F0F0F0;
-            color: #333;
-            border-bottom-left-radius: 4px;
-        }
-        
-        .input-section {
-            border-top: 1px solid #EFEFEF;
-            padding: 12px 16px;
-            background: white;
-            display: flex;
-            flex-direction: column;
-            gap: 10px;
-        }
-        
-        .file-upload {
-            display: flex;
-            gap: 8px;
-            align-items: center;
-        }
-        
-        .file-input-wrapper {
-            position: relative;
-            flex: 1;
-        }
-        
-        #fileInput {
-            display: none;
-        }
-        
-        .file-label {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            padding: 8px 12px;
-            background: #F9F9F9;
-            border: 1px solid #E0E0E0;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 13px;
-            color: #666;
-            transition: all 0.2s;
-            flex: 1;
-        }
-        
-        .file-label:hover {
-            background: #F5F5F5;
-            border-color: #D0D0D0;
-        }
-        
-        .upload-btn {
-            padding: 8px 16px;
-            background: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-size: 13px;
-            font-weight: 500;
-            transition: all 0.2s;
-        }
-        
-        .upload-btn:hover {
-            background: #45a049;
-        }
-        
-        .chat-input-area {
-            display: flex;
-            gap: 8px;
-        }
-        
-        .chat-input-area input {
-            flex: 1;
-            padding: 12px 14px;
-            border: 1px solid #E0E0E0;
-            border-radius: 8px;
-            font-size: 14px;
-            font-family: inherit;
-            transition: all 0.2s;
-        }
-        
-        .chat-input-area input:focus {
-            outline: none;
-            border-color: #F4D03F;
-            box-shadow: 0 0 0 3px rgba(244, 208, 63, 0.1);
-        }
-        
-        .send-btn {
-            padding: 12px 20px;
-            background: #F4D03F;
-            color: #333;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            font-weight: 600;
-            font-size: 14px;
-            transition: all 0.2s;
-        }
-        
-        .send-btn:hover {
-            background: #F5D547;
-            box-shadow: 0 2px 8px rgba(244, 208, 63, 0.3);
-        }
-        
-        .send-btn:active {
-            transform: scale(0.98);
-        }
-        
-        .file-name {
-            font-size: 12px;
-            color: #666;
-            padding: 0 8px;
-        }
-        
-        ::-webkit-scrollbar {
-            width: 8px;
-        }
-        
-        ::-webkit-scrollbar-track {
-            background: transparent;
-        }
-        
-        ::-webkit-scrollbar-thumb {
-            background: #D0D0D0;
-            border-radius: 4px;
-        }
-        
-        ::-webkit-scrollbar-thumb:hover {
-            background: #B0B0B0;
-        }
-    </style>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="DALIL - مستكشف المستندات بالذكاء الاصطناعي">
+  <title>DALIL | دليل</title>
+  <style>
+    :root{--navy:#081a33;--navy2:#102847;--gold:#d8aa4b;--cream:#f7f4ed;--line:#dfe4ea;--muted:#667085;--danger:#a33b3b}
+    *{box-sizing:border-box}body{margin:0;background:var(--cream);color:var(--navy);font-family:"Segoe UI",Tahoma,Arial,sans-serif}
+    button,input,textarea{font:inherit}button{cursor:pointer}.shell{min-height:100vh;display:grid;grid-template-rows:auto 1fr}
+    header{background:var(--navy);color:#fff;padding:18px 28px;display:flex;align-items:center;justify-content:space-between}
+    .brand{display:flex;gap:12px;align-items:center}.mark{width:42px;height:42px;border:2px solid var(--gold);border-radius:12px;display:grid;place-items:center;color:var(--gold);font-size:23px}
+    h1{font-size:20px;margin:0}.subtitle{font-size:12px;color:#b8c5d6;margin-top:3px}.status{font-size:12px;color:#cbd5e1}.status strong{color:var(--gold)}
+    main{width:min(1500px,100%);margin:auto;padding:24px;display:grid;grid-template-columns:280px minmax(360px,1fr) minmax(300px, .8fr);gap:18px}
+    .panel{background:#fff;border:1px solid var(--line);border-radius:16px;box-shadow:0 6px 20px #1028470c;min-height:0;display:flex;flex-direction:column;overflow:hidden}
+    .panel-head{padding:18px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center}.panel-head h2{font-size:16px;margin:0}
+    .panel-body{padding:16px;overflow:auto;min-height:0;flex:1}.upload{border:1px dashed #b6c1cf;border-radius:12px;padding:18px;text-align:center;background:#fafbfc}
+    .upload input{position:absolute;width:1px;height:1px;opacity:0}.file-picker{display:block;width:100%;padding:11px 12px;margin-bottom:12px;background:var(--navy);color:#fff;border-radius:9px;font-size:13px;font-weight:600;cursor:pointer;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.primary{background:var(--gold);color:var(--navy);border:0;border-radius:9px;padding:10px 15px;font-weight:700}.secondary{background:#eef2f6;color:var(--navy);border:0;border-radius:9px;padding:9px 12px}
+    .primary:disabled{opacity:.55;cursor:wait}.library{list-style:none;padding:0;margin:16px 0}.library li{padding:12px;border:1px solid var(--line);border-radius:10px;margin-bottom:8px;cursor:pointer}.library li:hover,.library li.active{border-color:var(--gold);background:#fffaf0}
+    .doc-name{font-weight:700;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.doc-meta{color:var(--muted);font-size:11px;margin-top:5px}.notice{font-size:12px;color:var(--muted);line-height:1.6}.notice.error{color:var(--danger)}
+    .chat{display:flex;flex-direction:column;height:100%}.messages{flex:1;overflow:auto;padding:18px}.message{display:flex;margin-bottom:14px}.message.user{justify-content:flex-start}.message.assistant{justify-content:flex-end}.bubble{max-width:88%;white-space:pre-wrap;line-height:1.8;padding:12px 15px;border-radius:14px;background:#f0f3f6}.user .bubble{background:var(--navy);color:#fff}
+    .composer{border-top:1px solid var(--line);padding:14px;display:flex;gap:8px}.composer textarea{resize:none;flex:1;border:1px solid var(--line);border-radius:10px;padding:10px;min-height:48px;direction:rtl}.composer textarea:focus{outline:2px solid #d8aa4b66}
+    .citation{display:block;width:100%;text-align:right;background:#fffaf0;border:1px solid #ead8aa;border-radius:9px;padding:9px;margin-top:8px;color:var(--navy)}.citation small{display:block;color:var(--muted);margin-top:3px}
+    .empty{color:var(--muted);text-align:center;padding:35px 10px}.viewer{background:#243447;flex:1;min-height:360px}.viewer iframe{width:100%;height:100%;min-height:360px;border:0}.evidence-text{padding:14px;line-height:1.8;background:#fffaf0;border-top:1px solid #ead8aa}.page{color:var(--gold);font-weight:700}
+    .tabs{display:none}.tab{border:0;background:transparent;color:#9aa8b8;padding:8px 12px}.tab.active{color:var(--gold);border-bottom:2px solid var(--gold)}
+    @media(max-width:1050px){main{grid-template-columns:240px 1fr}.evidence{grid-column:1/-1;min-height:400px}}
+    @media(max-width:700px){header{padding:14px 16px}.status{display:none}main{display:block;padding:10px 10px 70px}.panel{display:none;min-height:calc(100vh - 130px)}.panel.mobile-active{display:flex}.tabs{display:flex;position:fixed;bottom:0;right:0;left:0;background:var(--navy);justify-content:space-around;z-index:5}.tab{flex:1}.evidence{min-height:calc(100vh - 130px)}.viewer iframe{min-height:calc(100vh - 330px)}}
+  </style>
 </head>
 <body>
-    <div class="container">
-        <div class="header">
-            <div class="header-title">💬 Arabic RAG Chatbot</div>
-        </div>
-        
-        <div class="chat-container" id="chatContainer">
-            <div class="message bot">
-                <div class="bubble">مرحبًا! أنا مساعدك في الإجابة على أسئلتك. حمّل مستندًا أولاً ثم اسأل أي سؤال! 📚</div>
-            </div>
-        </div>
-        
-        <div class="input-section">
-            <div class="file-upload">
-                <div class="file-input-wrapper">
-                    <input type="file" id="fileInput" accept=".pdf,.txt,.docx,.docs">
-                    <label for="fileInput" class="file-label">
-                        📄 اختر ملف (PDF, TXT, DOCX)
-                    </label>
-                </div>
-                <button class="upload-btn" id="uploadBtn">تحميل</button>
-            </div>
-            <div id="fileName" class="file-name"></div>
-            
-            <div class="chat-input-area">
-                <input 
-                    type="text" 
-                    id="chatInput" 
-                    placeholder="اكتب سؤالك هنا..." 
-                    autocomplete="off"
-                >
-                <button class="send-btn" id="sendBtn">إرسال</button>
-            </div>
-        </div>
-    </div>
-
-    <script>
-        const chatContainer = document.getElementById('chatContainer');
-        const chatInput = document.getElementById('chatInput');
-        const sendBtn = document.getElementById('sendBtn');
-        const fileInput = document.getElementById('fileInput');
-        const uploadBtn = document.getElementById('uploadBtn');
-        const fileNameDisplay = document.getElementById('fileName');
-        const fileLabel = document.querySelector('.file-label');
-
-        function addMessage(type, text) {
-            const messageDiv = document.createElement('div');
-            messageDiv.className = `message ${type}`;
-            messageDiv.innerHTML = `<div class="bubble">${text}</div>`;
-            chatContainer.appendChild(messageDiv);
-            chatContainer.scrollTop = chatContainer.scrollHeight;
-        }
-
-        function updateFileLabel() {
-            if (fileInput.files.length > 0) {
-                const fileName = fileInput.files[0].name;
-                fileNameDisplay.textContent = `✓ تم تحديد: ${fileName}`;
-                fileLabel.textContent = '📄 اختر ملف آخر (اختياري)';
-            } else {
-                fileNameDisplay.textContent = '';
-                fileLabel.textContent = '📄 اختر ملف (PDF, TXT, DOCX)';
-            }
-        }
-
-        fileInput.addEventListener('change', updateFileLabel);
-
-        sendBtn.addEventListener('click', async () => {
-            const question = chatInput.value.trim();
-            if (!question) return;
-
-            addMessage('user', question);
-            chatInput.value = '';
-            sendBtn.disabled = true;
-
-            try {
-                const response = await fetch('/query', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ question })
-                });
-
-                const data = await response.json();
-                if (response.ok) {
-                    addMessage('bot', data.answer);
-                } else {
-                    addMessage('bot', `❌ خطأ: ${data.detail || 'حدث خطأ ما'}`);
-                }
-            } catch (error) {
-                console.error('Error:', error);
-                addMessage('bot', '❌ خطأ في الاتصال بالخادم');
-            } finally {
-                sendBtn.disabled = false;
-                chatInput.focus();
-            }
-        });
-
-        chatInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-                e.preventDefault();
-                sendBtn.click();
-            }
-        });
-
-        uploadBtn.addEventListener('click', async () => {
-            const file = fileInput.files[0];
-            if (!file) {
-                addMessage('bot', '⚠️ الرجاء اختيار ملف أولاً');
-                return;
-            }
-
-            const formData = new FormData();
-            formData.append('file', file);
-            
-            addMessage('bot', `⏳ جاري تحميل ومعالجة: ${file.name}...`);
-            uploadBtn.disabled = true;
-
-            try {
-                const response = await fetch('/documents/upload', {
-                    method: 'POST',
-                    body: formData
-                });
-
-                const data = await response.json();
-                if (response.ok) {
-                    addMessage('bot', `✅ تمت المعالجة! تم إنشاء ${data.chunk_count || '?'} أجزاء من المستند.`);
-                    fileInput.value = '';
-                    updateFileLabel();
-                } else {
-                    addMessage('bot', `❌ خطأ: ${data.detail || 'فشل التحميل'}`);
-                }
-            } catch (error) {
-                console.error('Error:', error);
-                addMessage('bot', '❌ خطأ في تحميل المستند');
-            } finally {
-                uploadBtn.disabled = false;
-            }
-        });
-    </script>
+<div class="shell">
+  <header><div class="brand"><div class="mark">د</div><div><h1>DALIL | دليل</h1><div class="subtitle">مستكشف المستندات بالذكاء الاصطناعي</div></div></div><div class="status">الوضع الخاص · <strong>مساحة العمل المحلية</strong></div></header>
+  <main>
+    <section class="panel library-panel mobile-active" id="libraryPanel"><div class="panel-head"><h2>مكتبة المستندات</h2><button class="secondary" id="refreshBtn" title="تحديث المكتبة">↻</button></div><div class="panel-body"><div class="upload"><input id="fileInput" type="file" accept=".pdf,.txt,.docx,.docs"><label class="file-picker" for="fileInput" id="fileLabel">اختر مستنداً · PDF, TXT, DOCX</label><button class="primary" id="uploadBtn">رفع وفهرسة</button><p class="notice" id="uploadStatus">اختر مستنداً لبدء التحقيق.</p></div><ul class="library" id="library"></ul></div></section>
+    <section class="panel chat-panel mobile-active" id="chatPanel"><div class="panel-head"><h2>محادثة التحقيق</h2><span class="notice" id="chatStatus">جاهز</span></div><div class="chat"><div class="messages" id="messages"><div class="message assistant"><div class="bubble">مرحباً بك في دليل. ارفع مستنداً ثم اطرح سؤالاً، وسأعرض الإجابة مع الأدلة القابلة للتحقق.</div></div></div><form class="composer" id="chatForm"><textarea id="question" rows="2" placeholder="اكتب سؤالك بالعربية..." aria-label="السؤال"></textarea><button class="primary" type="submit">تحقيق</button></form></div></section>
+    <section class="panel evidence" id="evidencePanel"><div class="panel-head"><h2>عارض الأدلة</h2><span class="page" id="evidencePage"></span></div><div class="viewer" id="viewer"><div class="empty">اختر مصدراً من إجابة التحقيق لعرض الصفحة الأصلية.</div></div><div class="evidence-text" id="evidenceText" hidden></div></section>
+  </main>
+  <nav class="tabs" aria-label="أقسام دليل"><button class="tab active" data-tab="libraryPanel">المستندات</button><button class="tab" data-tab="chatPanel">المحادثة</button><button class="tab" data-tab="evidencePanel">الأدلة</button></nav>
+</div>
+<script>
+const $=id=>document.getElementById(id);let selectedDoc=null;
+const friendlyError=detail=>({'Authentication required':'تعذر التحقق من جلسة التطوير الخاصة. تأكد من تشغيل DALIL بوضع التطوير الخاص.','Authentication is not configured':'لم تُهيأ مصادقة الخادم.','Document processing failed':'تعذر معالجة المستند. تحقق من نوع الملف وسلامته.','Could not extract text from the document':'لم يمكن استخراج نص قابل للفهرسة من المستند.'}[detail]||'حدث خطأ أثناء تنفيذ العملية.');
+function message(role,text,citations=[]){const row=document.createElement('div');row.className=`message ${role}`;const bubble=document.createElement('div');bubble.className='bubble';bubble.textContent=text;citations.forEach(c=>{const b=document.createElement('button');b.className='citation';b.textContent=`${c.source||'مستند'} · الصفحة ${c.page_num||'غير محددة'}`;const s=document.createElement('small');s.textContent=`المقطع ${c.chunk_id??'—'} · انقر لعرض الدليل`;b.appendChild(s);b.onclick=()=>showEvidence(c);bubble.appendChild(b)});row.appendChild(bubble);$('messages').appendChild(row);$('messages').scrollTop=$('messages').scrollHeight}
+function showEvidence(c){if(!c.document_id||!c.page_num){$('viewer').innerHTML='<div class="empty">لا تتوفر صفحة أصلية لهذا المصدر.</div>';return}selectedDoc=c.document_id;$('evidencePage').textContent=`الصفحة ${c.page_num}`;$('viewer').innerHTML=`<iframe title="صفحة الدليل" src="/documents/${encodeURIComponent(c.document_id)}/file#page=${c.page_num}"></iframe>`;$('evidenceText').hidden=false;$('evidenceText').textContent=c.snippet||'لا يتوفر مقتطف للنص.';document.querySelectorAll('.panel').forEach(p=>p.classList.remove('mobile-active'));$('evidencePanel').classList.add('mobile-active')}
+async function loadDocs(){const r=await fetch('/documents');if(!r.ok)return;const d=await r.json();$('library').replaceChildren();if(!d.documents.length){$('library').innerHTML='<li class="empty">لا توجد مستندات مفهرسة.</li>';return}d.documents.forEach(doc=>{const li=document.createElement('li');li.className=doc.document_id===selectedDoc?'active':'';li.innerHTML=`<div class="doc-name"></div><div class="doc-meta">${doc.chunk_count} مقطع · ${doc.added_at?new Date(doc.added_at).toLocaleDateString('ar'):''}</div>`;li.querySelector('.doc-name').textContent=doc.source;li.onclick=()=>{selectedDoc=doc.document_id;loadDocs();};$('library').appendChild(li)})}
+$('fileInput').onchange=()=>{$('fileLabel').textContent=$('fileInput').files[0]?.name||'اختر مستنداً · PDF, TXT, DOCX'};
+$('uploadBtn').onclick=async()=>{const f=$('fileInput').files[0];if(!f){$('uploadStatus').textContent='اختر ملفاً أولاً.';return}$('uploadBtn').disabled=true;$('uploadStatus').className='notice';$('uploadStatus').textContent='جارٍ استخراج النصوص وإنشاء الفهرس...';const fd=new FormData();fd.append('file',f);try{const r=await fetch('/documents/upload',{method:'POST',body:fd});const d=await r.json();if(!r.ok)throw Error(d.detail||'فشل الفهرسة');const pages=d.extraction?.ocr_required_pages||[];$('uploadStatus').textContent=`تمت الفهرسة: ${d.chunk_count} مقطع${pages.length?` · OCR مطلوب للصفحات: ${pages.join(', ')}`:''}`;selectedDoc=d.document_id;loadDocs()}catch(e){$('uploadStatus').className='notice error';$('uploadStatus').textContent=friendlyError(e.message)}finally{$('uploadBtn').disabled=false}};
+$('refreshBtn').onclick=loadDocs;$('chatForm').onsubmit=async e=>{e.preventDefault();const q=$('question').value.trim();if(!q)return;message('user',q);$('question').value='';$('chatStatus').textContent='جارٍ التحقيق...';try{const r=await fetch('/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({question:q,top_k:5})});const d=await r.json();if(!r.ok)throw Error(d.detail||'تعذر تنفيذ السؤال');message('assistant',d.answer||'لم يتم توليد إجابة.',d.citations||[]);$('chatStatus').textContent='تم التحقق من الأدلة'}catch(e){message('assistant',friendlyError(e.message));$('chatStatus').textContent='خطأ'}};document.querySelectorAll('.tab').forEach(t=>t.onclick=()=>{document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));t.classList.add('active');document.querySelectorAll('.panel').forEach(p=>p.classList.remove('mobile-active'));$(t.dataset.tab).classList.add('mobile-active')});loadDocs();
+</script>
 </body>
 </html>

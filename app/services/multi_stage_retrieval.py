@@ -191,7 +191,8 @@ class MultiStageRetriever:
     def retrieve(
         self,
         query: str,
-        top_k: int = 5
+        top_k: int = 5,
+        workspace_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve relevant documents using multi-stage approach.
@@ -205,10 +206,12 @@ class MultiStageRetriever:
         """
         query_embedding = self.embedding_service.embed(query)
         
-        candidates = self.vector_store.search(
-            query_embedding,
-            top_k=self.initial_top_k
-        )
+        if workspace_id is None:
+            candidates = self.vector_store.search(query_embedding, top_k=self.initial_top_k)
+        else:
+            candidates = self.vector_store.search(
+                query_embedding, top_k=self.initial_top_k, workspace_id=workspace_id
+            )
         
         if not candidates:
             return []
@@ -220,7 +223,8 @@ class MultiStageRetriever:
     def retrieve_with_stages(
         self,
         query: str,
-        top_k: int = 5
+        top_k: int = 5,
+        workspace_id: Optional[str] = None,
     ) -> Dict[str, List[Dict]]:
         """
         Retrieve documents and return results from each stage.
@@ -234,10 +238,14 @@ class MultiStageRetriever:
         """
         query_embedding = self.embedding_service.embed(query)
         
-        stage1_results = self.vector_store.search(
-            query_embedding,
-            top_k=self.initial_top_k
-        )
+        if workspace_id is None:
+            stage1_results = self.vector_store.search(
+                query_embedding, top_k=self.initial_top_k
+            )
+        else:
+            stage1_results = self.vector_store.search(
+                query_embedding, top_k=self.initial_top_k, workspace_id=workspace_id
+            )
         
         stage2_results = self.reranker.rerank(
             query,
@@ -321,7 +329,8 @@ class AdaptiveRetrieval:
     def retrieve(
         self,
         query: str,
-        top_k: int = 5
+        top_k: int = 5,
+        workspace_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve with adaptive strategy selection.
@@ -349,4 +358,4 @@ class AdaptiveRetrieval:
             reranker=adaptive_reranker
         )
         
-        return retriever.retrieve(query, top_k)
+        return retriever.retrieve(query, top_k, workspace_id=workspace_id)

@@ -30,14 +30,16 @@ class ArabicRAGChatbot:
     """Simple chatbot wrapper for Arabic RAG."""
 
     def __init__(self):
+        config.validate_llm()
         self.embedding_service = EmbeddingService(
             model_name=config.EMBEDDING_MODEL,
             device=config.EMBEDDING_DEVICE,
             allow_fallback=config.ALLOW_EMBEDDING_FALLBACK,
         )
         self.llm_service = LLMService(
+            provider=config.LLM_PROVIDER,
             model=config.LLM_MODEL,
-            api_key=config.LLM_API_KEY,
+            api_key=config.effective_llm_api_key,
             temperature=config.LLM_TEMPERATURE,
             max_tokens=config.LLM_MAX_TOKENS,
         )

@@ -7,6 +7,8 @@ with overlap for maintaining context.
 
 import os
 import logging
+import re
+import unicodedata
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
@@ -53,6 +55,7 @@ class DocumentLoader:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
+        self.last_report: Dict[str, object] = {}
     
     def load_file(self, file_path: str) -> List[DocumentChunk]:
         """
@@ -83,26 +86,88 @@ class DocumentLoader:
             
             chunks = []
             doc_id = Path(file_path).stem
-            
+            poor_pages: List[int] = []
+            page_reports: List[Dict[str, object]] = []
+
             with open(file_path, 'rb') as f:
                 reader = PyPDF2.PdfReader(f)
-                full_text = ""
                 
                 for page_num, page in enumerate(reader.pages):
                     try:
-                        text = page.extract_text()
-                        full_text += f"\n[Page {page_num + 1}]\n{text}"
+                        text = self._normalize_extracted_text(page.extract_text() or "")
+                        quality = self._assess_page_quality(text)
+                        page_reports.append({"page_num": page_num + 1, **quality})
+                        if quality["ocr_required"]:
+                            poor_pages.append(page_num + 1)
+                            logger.warning(
+                                "PDF page %s requires OCR; skipping unusable extracted text",
+                                page_num + 1,
+                            )
+                            continue
+                        page_chunks = self._chunk_text(
+                            text,
+                            doc_id,
+                            file_path,
+                            page_num=page_num + 1,
+                        )
+                        chunks.extend(page_chunks)
                     except Exception as e:
                         logger.warning(f"Failed to extract page {page_num + 1}: {str(e)}")
             
-            return self._chunk_text(full_text, doc_id, file_path)
+            for chunk_id, chunk in enumerate(chunks):
+                chunk.chunk_id = chunk_id
+                chunk.metadata.update({"extraction_quality": "text"})
+            self.last_report = {
+                "format": "pdf",
+                "page_count": len(reader.pages),
+                "indexed_page_count": len(page_reports) - len(poor_pages),
+                "ocr_required_pages": poor_pages,
+                "pages": page_reports,
+            }
+            return chunks
             
         except ImportError:
             logger.error("PyPDF2 not installed. Install with: pip install PyPDF2")
             return []
         except Exception as e:
             logger.error(f"Error loading PDF {file_path}: {str(e)}")
+            self.last_report = {
+                "format": "pdf",
+                "page_count": 0,
+                "indexed_page_count": 0,
+                "ocr_required_pages": [],
+                "error": "PDF extraction failed",
+            }
             return []
+
+    @staticmethod
+    def _normalize_extracted_text(text: str) -> str:
+        """Normalize PDF glyph variants while preserving Arabic word boundaries."""
+        normalized = unicodedata.normalize("NFKC", text)
+        normalized = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]", " ", normalized)
+        normalized = re.sub(r"[ \t]+", " ", normalized)
+        normalized = re.sub(r" *\n *", "\n", normalized)
+        return normalized.strip()
+
+    @staticmethod
+    def _assess_page_quality(text: str) -> Dict[str, object]:
+        """Identify pages whose extracted text is too sparse or mostly corrupted."""
+        arabic_count = sum("\u0600" <= char <= "\u06ff" for char in text)
+        meaningful_count = sum(char.isalnum() for char in text)
+        suspicious_count = sum(char in "/\\[]" or ord(char) in {0xfffd} for char in text)
+        arabic_ratio = arabic_count / max(meaningful_count, 1)
+        ocr_required = (
+            len(text) < 80
+            or arabic_count < 10
+            or (meaningful_count >= 100 and arabic_ratio < 0.03)
+        )
+        return {
+            "character_count": len(text),
+            "arabic_character_count": arabic_count,
+            "arabic_ratio": round(arabic_ratio, 4),
+            "suspicious_character_count": suspicious_count,
+            "ocr_required": ocr_required,
+        }
     
     def _load_text(self, file_path: str) -> List[DocumentChunk]:
         """Load and chunk a text file."""
@@ -150,7 +215,8 @@ class DocumentLoader:
         self,
         text: str,
         document_id: str,
-        source: str
+        source: str,
+        page_num: Optional[int] = None,
     ) -> List[DocumentChunk]:
         """
         Split text into overlapping chunks.
@@ -186,7 +252,8 @@ class DocumentLoader:
                             text=current_chunk.strip(),
                             document_id=document_id,
                             chunk_id=chunk_id,
-                            source=source
+                            source=source,
+                            page_num=page_num,
                         )
                     )
                     chunk_id += 1
@@ -205,7 +272,8 @@ class DocumentLoader:
                     text=current_chunk.strip(),
                     document_id=document_id,
                     chunk_id=chunk_id,
-                    source=source
+                    source=source,
+                    page_num=page_num,
                 )
             )
         

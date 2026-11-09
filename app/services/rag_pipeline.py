@@ -21,7 +21,12 @@ from app.services.multi_stage_retrieval import (
 class VectorStore(Protocol):
     """Protocol that any vector-store implementation must satisfy."""
 
-    def search(self, query_embedding: np.ndarray, top_k: int = 5) -> List[Dict[str, Any]]:
+    def search(
+        self,
+        query_embedding: np.ndarray,
+        top_k: int = 5,
+        workspace_id: str | None = None,
+    ) -> List[Dict[str, Any]]:
         ...
 
 
@@ -56,7 +61,7 @@ class RAGPipeline:
                     reranker=ArabicReRanker(),
                 )
 
-    def answer(self, question: str) -> str:
+    def answer(self, question: str, workspace_id: str | None = None) -> str:
         """Answer a question using retrieved knowledge-base context."""
         if not question or not isinstance(question, str):
             raise ValueError("Question must be a non-empty string")
@@ -69,10 +74,21 @@ class RAGPipeline:
             )
 
             if self.retrieval_mode == "multi_stage" and self.multi_stage_retriever and not use_fast_retrieval:
-                retrieved_docs = self.multi_stage_retriever.retrieve(question, top_k=self.top_k)
+                retrieved_docs = self.multi_stage_retriever.retrieve(
+                    question, top_k=self.top_k, workspace_id=workspace_id
+                )
             else:
                 question_embedding = self.embedding_service.embed(question)
-                retrieved_docs = self.vector_store.search(question_embedding, top_k=self.top_k)
+                if workspace_id is None:
+                    retrieved_docs = self.vector_store.search(
+                        question_embedding, top_k=self.top_k
+                    )
+                else:
+                    retrieved_docs = self.vector_store.search(
+                        question_embedding,
+                        top_k=self.top_k,
+                        workspace_id=workspace_id,
+                    )
 
             if not retrieved_docs:
                 context = "لا توجد معلومات متاحة في قاعدة المعرفة."
@@ -101,6 +117,17 @@ class RAGPipeline:
                     reason=(
                         "LLM API is unavailable or API key is missing, so I am returning a quick extract from your documents."
                     ),
+                )
+            if answer in {
+                LLMService.LLM_AUTHENTICATION_FAILED,
+                LLMService.LLM_BILLING_FAILED,
+                LLMService.LLM_MODEL_UNAVAILABLE,
+                LLMService.LLM_NETWORK_FAILED,
+            }:
+                return self._build_retrieval_fallback(
+                    question,
+                    retrieved_docs,
+                    reason="لم تتوفر خدمة توليد الإجابة، لذلك لم يتم تقديم إجابة مولدة.",
                 )
             if answer.startswith("Error generating response:"):
                 return self._build_retrieval_fallback(
