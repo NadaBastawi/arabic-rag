@@ -296,30 +296,50 @@ class DocumentLoader:
         first = 0
         while first < len(offsets):
             last = min(len(offsets), first + self.max_tokens)
-            # Retokenization at a new boundary and prefixes/special tokens may
-            # change the count. Verify the exact input used by the model.
-            while last > first and not fits(text[offsets[first][0]:offsets[last-1][1]]):
+            start_char = 0 if first == 0 else offsets[first][0]
+
+            def end_char_for(i: int) -> int:
+                return len(text) if i == len(offsets) else offsets[i][0]
+
+            # Verify the exact source slice, including the model prompt and
+            # special tokens, instead of relying on truncating tokenization.
+            while last > first and not fits(text[start_char:end_char_for(last)]):
                 last -= 1
             if last == first:
                 raise ValueError("A single token does not fit the embedding model limit")
             if last < len(offsets):
-                segment = text[offsets[first][0]:offsets[last-1][1]]
+                segment = text[start_char:end_char_for(last)]
                 boundaries = list(re.finditer(r"(?:[.!?؟؛]+[\s]+|\n\s*\n)", segment))
                 if boundaries:
-                    target = offsets[first][0] + boundaries[-1].end()
+                    target = start_char + boundaries[-1].end()
                     candidate = next((i for i in range(last, first, -1)
-                                      if offsets[i-1][1] <= target), first)
+                                      if end_char_for(i) <= target), first)
                     if candidate - first >= (last - first) // 2 and candidate > first:
                         last = candidate
-            part = text[offsets[first][0]:offsets[last-1][1]].strip()
+            end_char = end_char_for(last)
+            while start_char < end_char and text[start_char].isspace():
+                start_char += 1
+            while end_char > start_char and text[end_char - 1].isspace():
+                end_char -= 1
+            part = text[start_char:end_char]
             if not fits(part):
                 raise ValueError("Chunk exceeds the embedding model token limit")
             if part:
                 chunks.append(DocumentChunk(part, document_id, len(chunks), source,
-                                            page_num=page_num))
+                                            page_num=page_num,
+                                            metadata={"char_start": start_char,
+                                                      "char_end": end_char}))
             if last == len(offsets):
                 break
             first = max(first + 1, last - min(self.token_overlap, max(0, (last-first)//4)))
+
+        coverage = bytearray(len(text))
+        for chunk in chunks:
+            start_char = chunk.metadata["char_start"]
+            end_char = chunk.metadata["char_end"]
+            coverage[start_char:end_char] = b"\x01" * (end_char - start_char)
+        if any(not coverage[i] and not ch.isspace() for i, ch in enumerate(text)):
+            raise ValueError("Tokenizer chunking would omit source text")
         return chunks
 
     def load_directory(self, dir_path: str) -> List[DocumentChunk]:

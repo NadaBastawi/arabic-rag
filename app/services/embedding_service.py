@@ -29,6 +29,10 @@ class EmbeddingService:
         fallback_dimension: int = 384,
         allow_fallback: bool = False,
     ):
+        # E5 requires distinct query/passage prefixes. Refuse it until an
+        # explicit migration implements and evaluates both paths.
+        if re.match(r"(?:multilingual-)?e5-", model_name.rsplit("/", 1)[-1], re.IGNORECASE):
+            raise ValueError("E5 requires an explicit migration with query and passage prefixes")
         self.model_name = model_name
         self.device = self._normalize_device(device)
         self.fallback_dimension = fallback_dimension
@@ -52,14 +56,14 @@ class EmbeddingService:
         """Load sentence-transformers model or enable fallback mode."""
         try:
             from sentence_transformers import SentenceTransformer
-        except ImportError:
+        except ImportError as exc:
             if not self.allow_fallback:
                 raise RuntimeError(
-                    "sentence-transformers is not installed and embedding fallback is disabled"
-                )
+                    "Could not import the embedding runtime; check the pinned dependencies"
+                ) from exc
             self._using_fallback = True
             logger.warning(
-                "sentence-transformers is not installed; using hashed fallback embeddings"
+                "Embedding runtime could not be imported; using hashed fallback embeddings"
             )
             return
 
@@ -167,6 +171,12 @@ class EmbeddingService:
         else:
             embeddings = self._fallback_embed(texts)
 
+        embeddings = np.asarray(embeddings, dtype=np.float32)
+        expected_dim = self.get_embedding_dimension()
+        if embeddings.shape != (len(texts), expected_dim):
+            raise RuntimeError("Embedding model returned an unexpected vector shape")
+        if not np.isfinite(embeddings).all() or np.any(np.linalg.norm(embeddings, axis=1) == 0):
+            raise RuntimeError("Embedding model returned invalid vectors")
         if single_text:
             return embeddings[0]
         return embeddings

@@ -330,3 +330,47 @@ def test_embedding_rejects_inputs_above_actual_model_limit():
     service.model_name = "test"
     with pytest.raises(ValueError, match="token limit"):
         service.embed("1234567")
+
+
+def test_e5_requires_explicit_migration():
+    from app.services.embedding_service import EmbeddingService
+    with pytest.raises(ValueError, match="explicit migration"):
+        EmbeddingService(model_name="intfloat/multilingual-e5-large")
+
+
+def test_embedding_rejects_nonfinite_vectors():
+    from app.services.embedding_service import EmbeddingService
+    class Tokenizer:
+        is_fast = True
+        model_max_length = 128
+        def __call__(self, text, **kwargs): return {"input_ids": [1, 2, 3]}
+    class Model:
+        tokenizer = Tokenizer()
+        max_seq_length = 128
+        default_prompt_name = None
+        def get_sentence_embedding_dimension(self): return 2
+        def encode(self, texts, **kwargs): return np.array([[float('nan'), 1.0]])
+    service = EmbeddingService.__new__(EmbeddingService)
+    service.model = Model(); service._using_fallback = False
+    service.allow_fallback = False; service.model_name = 'test'
+    with pytest.raises(RuntimeError, match='invalid vectors'):
+        service.embed('نص عربي')
+
+
+def test_token_chunks_cover_source_characters_the_tokenizer_skips():
+    class SparseTokenizer:
+        def __call__(self, text, add_special_tokens=True, return_offsets_mapping=False, truncation=False):
+            offsets = [(i, i + 1) for i, ch in enumerate(text) if ch not in '# ']
+            result = {'input_ids': list(range(len(offsets) + (2 if add_special_tokens else 0)))}
+            if return_offsets_mapping:
+                result['offset_mapping'] = offsets
+            return result
+    text = '# نص عربي # يحوي رموزا # يجب الاحتفاظ بها #'
+    loader = DocumentLoader(min_chunk_size=1, tokenizer=SparseTokenizer(), max_tokens=12, token_overlap=2)
+    chunks = loader._chunk_text(text, 'doc', 'source', page_num=12)
+    covered = set()
+    for chunk in chunks:
+        a, b = chunk.metadata['char_start'], chunk.metadata['char_end']
+        assert chunk.text == text[a:b]
+        covered.update(range(a, b))
+    assert all(i in covered for i, char in enumerate(text) if not char.isspace())
