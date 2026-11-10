@@ -1,3 +1,5 @@
+> **Production status:** Not ready for public deployment. Production identity, durable storage, safe concurrent index writes, and a real OpenAI smoke test are not yet implemented or verified. The application deliberately refuses startup on Azure App Service or with `APP_ENV=production`. The instructions below describe development only and must not be used as a production deployment guide.
+
 # Ar-RAG — Arabic Retrieval-Augmented Generation System
 
 An end-to-end Arabic RAG system that combines multi-stage retrieval, morphology-aware preprocessing, and LLM-powered generation to answer questions over Arabic document collections. The default generation provider is OpenAI, with optional Gemini support.

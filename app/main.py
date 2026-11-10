@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -58,6 +58,7 @@ class QueryRequest(BaseModel):
     question: str
     top_k: int = Field(default=5, ge=1, le=20)
     retrieval_mode: Optional[str] = None
+    document_id: Optional[str] = None
 
 
 class DocumentInfo(BaseModel):
@@ -121,6 +122,10 @@ def _current_workspace(
     An empty token is never accepted when authentication is enabled.  This
     avoids silently running a production deployment without an auth boundary.
     """
+    # No production identity integration is configured yet. Never accept
+    # development flags or a shared token as a production identity.
+    if config.is_production:
+        raise HTTPException(status_code=503, detail="Production authentication is not configured")
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", config.AUTH_WORKSPACE_ID):
         raise HTTPException(status_code=500, detail="Authentication workspace is misconfigured")
     if config.LOCAL_DEV_MODE and config.PRIVATE_DEV_MODE:
@@ -173,12 +178,21 @@ def _registry(workspace_id: str) -> dict[str, DocumentInfo]:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     logger.info("Starting Arabic RAG API")
+    if config.is_production:
+        raise RuntimeError("Production authentication and durable storage must be configured before deployment")
     get_services()
     yield
     logger.info("Shutting down Arabic RAG API")
 
 
 app = FastAPI(title="Arabic RAG API", version="2.0.0", lifespan=lifespan)
+
+
+@app.exception_handler(ValidationError)
+async def validation_error_handler(_request: Request, _exc: ValidationError) -> JSONResponse:
+    return JSONResponse(status_code=422, content={"detail": "Invalid input"})
+
+
 if Path("static").is_dir():
     app.mount("/static", StaticFiles(directory="static"), name="static")
 
@@ -255,7 +269,8 @@ async def add_document(
         if requested_id in _registry(workspace_id):
             raise HTTPException(status_code=409, detail="Document ID already exists")
     now = __import__("datetime").datetime.now(__import__("datetime").timezone.utc).isoformat()
-    metadata = dict(request.metadata)
+    protected = {"faiss_id", "text", "document_id", "source", "workspace_id", "added_at", "content_sha256"}
+    metadata = {k: v for k, v in request.metadata.items() if k not in protected}
     metadata.update({"workspace_id": workspace_id, "added_at": now})
     store.add_documents(
         [text], embedder.embed([text]), [document_id], [Path(request.source).name], [metadata]
@@ -281,6 +296,18 @@ async def upload_document(
 
     if not data:
         raise HTTPException(status_code=400, detail="Uploaded file is empty")
+    if suffix == ".pdf" and not data.startswith(b"%PDF-"):
+        raise HTTPException(status_code=415, detail="Invalid PDF file")
+    if suffix == ".docx" and not data.startswith(b"PK\x03\x04"):
+        raise HTTPException(status_code=415, detail="Invalid DOCX file")
+    embedder, _, store, _ = get_services()
+    digest = hashlib.sha256(data).hexdigest()
+    for item in store.metadata:
+        if item.get("workspace_id") == workspace_id and item.get("content_sha256") == digest:
+            existing_id = str(item["document_id"])
+            existing = _registry(workspace_id)[existing_id]
+            return {"document_id": existing_id, "source": existing.source,
+                    "chunk_count": existing.chunk_count, "duplicate": True, "extraction": {}}
     Path(config.DOCS_PATH, workspace_id).mkdir(parents=True, exist_ok=True)
     document_id = uuid.uuid4().hex
     target = Path(config.DOCS_PATH, workspace_id, f"{document_id}{suffix}")
@@ -299,6 +326,7 @@ async def upload_document(
             [
                 {
                     "workspace_id": workspace_id,
+                    "content_sha256": digest,
                     "chunk_id": chunk.chunk_id,
                     "page_num": chunk.page_num,
                     "added_at": now,
@@ -366,7 +394,17 @@ async def query(
     _, _, store, pipeline = get_services()
     question = InputValidator.validate_query(request.question)
     docs = []
-    if request.retrieval_mode == "basic" or not pipeline.multi_stage_retriever:
+    if request.document_id:
+        if request.document_id not in _registry(workspace_id):
+            raise HTTPException(status_code=404, detail="Document not found")
+        # Filter after searching all workspace vectors so other documents cannot
+        # crowd the selected document out of a top-k search.
+        candidates = store.search(
+            pipeline.embedding_service.embed(question),
+            top_k=len(store.metadata), workspace_id=workspace_id,
+        )
+        docs = [d for d in candidates if d.get("document_id") == request.document_id][:request.top_k]
+    elif request.retrieval_mode == "basic" or not pipeline.multi_stage_retriever:
         docs = store.search(
             pipeline.embedding_service.embed(question),
             top_k=request.top_k,
@@ -381,7 +419,7 @@ async def query(
             "answer": "لا توجد معلومات ذات صلة في المستندات المرفوعة.",
             "retrieved_documents": [],
         }
-    answer = pipeline.answer(question, workspace_id=workspace_id)
+    answer = pipeline.answer(question, workspace_id=workspace_id, retrieved_docs=docs)
     citations = [
         {
             "document_id": doc.get("document_id"),
@@ -402,7 +440,7 @@ async def query(
             "metadata": {
                 key: value
                 for key, value in doc.get("metadata", {}).items()
-                if key not in {"workspace_id", "added_at"}
+                if key not in {"workspace_id", "added_at", "content_sha256"}
             },
         }
         for doc in docs

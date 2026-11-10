@@ -227,3 +227,52 @@ def test_api_document_add_and_list(api_client):
     payload = list_response.json()
     assert payload["total_count"] == 1
     assert payload["documents"][0]["document_id"] == "doc_test"
+
+
+def test_upload_duplicate_and_selected_document_evidence(api_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(api_main.config, "DOCS_PATH", str(tmp_path))
+    text = ("الذكاء العاطفي يساعد الإنسان على فهم مشاعره. " * 8).encode("utf-8")
+    first = api_client.post("/documents/upload", files={"file": ("first.txt", text, "text/plain")})
+    assert first.status_code == 200, first.text
+    duplicate = api_client.post("/documents/upload", files={"file": ("renamed.txt", text, "text/plain")})
+    assert duplicate.status_code == 200
+    assert duplicate.json()["duplicate"] is True
+    assert duplicate.json()["document_id"] == first.json()["document_id"]
+    assert api_client.get("/documents").json()["total_count"] == 1
+    other = api_client.post("/documents/add", json={"text": "مستند آخر يحتوي على معلومات مختلفة تماما", "document_id": "other"})
+    assert other.status_code == 200
+    prompts = []
+    monkeypatch.setattr(api_main.llm_service, "generate", lambda prompt: prompts.append(prompt) or "answer")
+    answer = api_client.post("/query", json={"question": "ما الذكاء العاطفي؟", "document_id": first.json()["document_id"], "top_k": 2})
+    assert answer.status_code == 200
+    payload = answer.json()
+    assert payload["citations"]
+    assert all(c["document_id"] == first.json()["document_id"] for c in payload["citations"])
+    assert all(d["text"] in prompts[0] for d in payload["retrieved_documents"])
+    assert "مستند آخر يحتوي" not in prompts[0]
+    assert api_client.post("/query", json={"question": "سؤال صالح", "document_id": "missing"}).status_code == 404
+    assert api_client.post("/documents/upload", files={"file": ("fake.pdf", b"not a pdf", "application/pdf")}).status_code == 415
+
+
+def test_legacy_index_without_model_manifest_is_not_assumed_compatible(embedding_service):
+    from pathlib import Path
+    with tempfile.TemporaryDirectory() as tmp:
+        store = FAISSVectorStore(tmp, embedding_model="model-a")
+        store.add_documents(["نص محفوظ"], embedding_service.embed(["نص محفوظ"]))
+        Path(tmp, "manifest.json").unlink()
+        legacy = FAISSVectorStore(tmp, embedding_model="model-a")
+        with pytest.raises(ValueError, match="model is unknown"):
+            legacy.ensure_embedding_dimension(embedding_service.dim)
+        assert len(legacy.metadata) == 1
+
+
+def test_add_document_cannot_override_internal_metadata(api_client):
+    response = api_client.post('/documents/add', json={
+        'text': 'نص عربي صالح للاختبار', 'document_id': 'safe',
+        'metadata': {'faiss_id': 123456, 'document_id': 'forged', 'source': 'forged', 'text': 'forged', 'workspace_id': 'other'}
+    })
+    assert response.status_code == 200
+    assert api_client.get('/documents').json()['documents'][0]['document_id'] == 'safe'
+    result = api_client.post('/query', json={'question': 'نص عربي', 'document_id': 'safe'})
+    assert result.status_code == 200
+    assert result.json()['retrieved_documents'][0]['text'] == 'نص عربي صالح للاختبار'

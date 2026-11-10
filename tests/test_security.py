@@ -95,3 +95,24 @@ def test_vector_search_and_delete_are_workspace_scoped():
         assert store.delete_document("same-name-b", workspace_id="a") is False
         assert store.delete_document("same-name-a", workspace_id="a") is True
         assert any(item["document_id"] == "same-name-b" for item in store.metadata)
+
+
+def test_production_never_accepts_development_bypass(monkeypatch):
+    monkeypatch.setattr(main.config, "APP_ENV", "production")
+    monkeypatch.setattr(main.config, "AUTH_ENABLED", False)
+    monkeypatch.setattr(main.config, "LOCAL_DEV_MODE", True)
+    monkeypatch.setattr(main.config, "PRIVATE_DEV_MODE", True)
+    request = Request({"type": "http", "client": ("127.0.0.1", 8000), "headers": []})
+    with pytest.raises(HTTPException) as rejected:
+        main._current_workspace(request, None)
+    assert rejected.value.status_code == 503
+
+
+def test_azure_environment_cannot_use_development_bypass(monkeypatch):
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "example")
+    monkeypatch.setattr(main.config, "APP_ENV", "development")
+    monkeypatch.setattr(main.config, "AUTH_ENABLED", False)
+    request = Request({"type": "http", "client": ("127.0.0.1", 8000), "headers": []})
+    with pytest.raises(HTTPException) as rejected:
+        main._current_workspace(request, None)
+    assert rejected.value.status_code == 503

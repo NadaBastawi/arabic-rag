@@ -1,3 +1,5 @@
+> **Production status:** Not ready for public deployment. Production identity, durable storage, safe concurrent index writes, and a real OpenAI smoke test are not yet implemented or verified. The application deliberately refuses startup on Azure App Service or with `APP_ENV=production`. The instructions below describe development only and must not be used as a production deployment guide.
+
 # Arabic RAG System - Complete Setup and Deployment Guide
 
 ## 🚀 Quick Start

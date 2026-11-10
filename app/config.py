@@ -90,6 +90,12 @@ class Config:
 
     LOG_LEVEL: str = _environment_value("LOG_LEVEL", "INFO")
 
+    APP_ENV: str = _environment_value("APP_ENV", "development").lower()
+
+    @property
+    def is_production(self) -> bool:
+        return self.APP_ENV == "production" or bool(os.getenv("WEBSITE_SITE_NAME"))
+
     # A configured bearer token is a local/staging authentication mechanism.
     # Production deployments should replace this boundary with Entra ID/JWT
     # validation rather than disabling authentication.

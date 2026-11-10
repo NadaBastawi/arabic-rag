@@ -61,7 +61,7 @@ class RAGPipeline:
                     reranker=ArabicReRanker(),
                 )
 
-    def answer(self, question: str, workspace_id: str | None = None) -> str:
+    def answer(self, question: str, workspace_id: str | None = None, retrieved_docs: List[Dict[str, Any]] | None = None) -> str:
         """Answer a question using retrieved knowledge-base context."""
         if not question or not isinstance(question, str):
             raise ValueError("Question must be a non-empty string")
@@ -73,7 +73,9 @@ class RAGPipeline:
                 and self.llm_service.is_quota_backoff_active()
             )
 
-            if self.retrieval_mode == "multi_stage" and self.multi_stage_retriever and not use_fast_retrieval:
+            if retrieved_docs is not None:
+                pass  # Use exactly the passages returned as evidence by the API.
+            elif self.retrieval_mode == "multi_stage" and self.multi_stage_retriever and not use_fast_retrieval:
                 retrieved_docs = self.multi_stage_retriever.retrieve(
                     question, top_k=self.top_k, workspace_id=workspace_id
                 )

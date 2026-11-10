@@ -114,6 +114,8 @@ class FAISSVectorStore:
         if embedding_dim <= 0:
             raise ValueError("Embedding dimension must be a positive integer")
 
+        if self.metadata and self.embedding_model and not self._manifest.get("embedding_model"):
+            raise ValueError("Index embedding model is unknown; verify the original model or reindex separately")
         stored_model = self._manifest.get("embedding_model")
         stored_schema = self._manifest.get("schema_version")
         if stored_schema is not None and stored_schema != self.schema_version:
@@ -381,6 +383,16 @@ class FAISSVectorStore:
                 raise RuntimeError(
                     "Metadata exists but the persisted embedding matrix is missing"
                 )
+
+        if self._backend == "faiss":
+            vector_count = int(self.index.ntotal) if self.index is not None else 0
+        else:
+            vector_count = len(self._embeddings_np) if self._embeddings_np is not None else 0
+        if vector_count != len(self.metadata):
+            raise RuntimeError("Index and metadata counts differ; restore a consistent backup")
+        manifest_dim = self._manifest.get("embedding_dimension")
+        if manifest_dim is not None and self._embedding_dim is not None and manifest_dim != self._embedding_dim:
+            raise RuntimeError("Index dimension does not match manifest")
 
     def get_stats(self) -> Dict:
         if self._backend == "faiss":
