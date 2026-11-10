@@ -52,6 +52,8 @@ class DocumentLoader:
             chunk_overlap: Overlap between consecutive chunks.
             min_chunk_size: Minimum chunk size to keep.
         """
+        if chunk_size <= 0 or chunk_overlap < 0 or chunk_overlap >= chunk_size:
+            raise ValueError("chunk_size must be positive and overlap must be smaller than chunk_size")
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
@@ -233,51 +235,32 @@ class DocumentLoader:
             return []
         
         chunks = []
-        chunk_id = 0
-        
-        # Split by paragraphs first to preserve context
-        paragraphs = text.split('\n\n')
-        current_chunk = ""
-        
-        for paragraph in paragraphs:
-            paragraph = paragraph.strip()
-            if not paragraph:
-                continue
-            
-            # If adding this paragraph exceeds chunk size, save current chunk
-            if current_chunk and len(current_chunk) + len(paragraph) > self.chunk_size:
-                if len(current_chunk) >= self.min_chunk_size:
-                    chunks.append(
-                        DocumentChunk(
-                            text=current_chunk.strip(),
-                            document_id=document_id,
-                            chunk_id=chunk_id,
-                            source=source,
-                            page_num=page_num,
-                        )
-                    )
-                    chunk_id += 1
-                
-                # Add overlap
-                words = current_chunk.split()
-                overlap_size = len(" ".join(words[-10:])) if len(words) > 10 else len(current_chunk) // 2
-                current_chunk = current_chunk[-overlap_size:] if overlap_size > 0 else ""
-            
-            current_chunk += ("\n\n" if current_chunk else "") + paragraph
-        
-        # Add final chunk
-        if current_chunk and len(current_chunk) >= self.min_chunk_size:
-            chunks.append(
-                DocumentChunk(
-                    text=current_chunk.strip(),
-                    document_id=document_id,
-                    chunk_id=chunk_id,
-                    source=source,
-                    page_num=page_num,
-                )
-            )
-        
-        logger.info(f"Created {len(chunks)} chunks from {document_id}")
+        start = 0
+        text = text.strip()
+        while start < len(text):
+            end = min(start + self.chunk_size, len(text))
+            if end < len(text):
+                # Prefer a word boundary without allowing an exceptionally long
+                # word or a large overlap to stall progress.
+                boundary = text.rfind(" ", start + self.chunk_size // 2, end)
+                if boundary > start:
+                    end = boundary
+            part = text[start:end].strip()
+            if part:
+                chunks.append(DocumentChunk(
+                    text=part, document_id=document_id, chunk_id=len(chunks),
+                    source=source, page_num=page_num,
+                ))
+            if end == len(text):
+                break
+            next_start = max(start + 1, end - self.chunk_overlap)
+            if self.chunk_overlap and next_start > start + 1:
+                boundary = text.find(" ", next_start, end)
+                if boundary >= 0:
+                    next_start = boundary + 1
+            start = next_start
+
+        logger.info("Created %d chunks from %s", len(chunks), document_id)
         return chunks
     
     def load_directory(self, dir_path: str) -> List[DocumentChunk]:

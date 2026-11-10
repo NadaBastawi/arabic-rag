@@ -276,3 +276,13 @@ def test_add_document_cannot_override_internal_metadata(api_client):
     result = api_client.post('/query', json={'question': 'نص عربي', 'document_id': 'safe'})
     assert result.status_code == 200
     assert result.json()['retrieved_documents'][0]['text'] == 'نص عربي صالح للاختبار'
+
+
+def test_long_single_paragraph_is_split_without_losing_words():
+    loader = DocumentLoader(chunk_size=80, chunk_overlap=15, min_chunk_size=10)
+    words = [f"word{i:03d}" for i in range(70)]
+    chunks = loader._chunk_text(" ".join(words), "doc", "source", page_num=7)
+    assert len(chunks) > 1
+    assert all(len(c.text) <= 80 and c.page_num == 7 for c in chunks)
+    assert all(any(word in chunk.text.split() for chunk in chunks) for word in words)
+    assert set(chunks[0].text.split()) & set(chunks[1].text.split())
