@@ -94,7 +94,7 @@ def _services() -> tuple[EmbeddingService, LLMService, FAISSVectorStore, RAGPipe
             embedding_service.get_embedding_dimension(), reset_on_mismatch=False
         )
     if document_loader is None:
-        document_loader = DocumentLoader(chunk_size=500, chunk_overlap=50)
+        document_loader = DocumentLoader(chunk_size=500, chunk_overlap=50, **embedding_service.chunking_config())
     if rag_pipeline is None:
         rag_pipeline = RAGPipeline(
             embedding_service=embedding_service,

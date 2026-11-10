@@ -42,7 +42,11 @@ class DocumentLoader:
         self,
         chunk_size: int = 500,
         chunk_overlap: int = 50,
-        min_chunk_size: int = 100
+        min_chunk_size: int = 100,
+        tokenizer=None,
+        max_tokens: Optional[int] = None,
+        token_overlap: int = 32,
+        token_prefix: str = "",
     ):
         """
         Initialize document loader.
@@ -57,6 +61,12 @@ class DocumentLoader:
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.min_chunk_size = min_chunk_size
+        self.tokenizer = tokenizer
+        self.max_tokens = max_tokens
+        self.token_overlap = token_overlap
+        self.token_prefix = token_prefix
+        if tokenizer is not None and (not max_tokens or max_tokens < 2 or token_overlap < 0):
+            raise ValueError("A valid token limit and overlap are required")
         self.last_report: Dict[str, object] = {}
     
     def load_file(self, file_path: str) -> List[DocumentChunk]:
@@ -114,6 +124,8 @@ class DocumentLoader:
                         )
                         chunks.extend(page_chunks)
                     except Exception as e:
+                        if self.tokenizer is not None:
+                            raise
                         logger.warning(f"Failed to extract page {page_num + 1}: {str(e)}")
             
             for chunk_id, chunk in enumerate(chunks):
@@ -234,6 +246,9 @@ class DocumentLoader:
         if not text or len(text.strip()) < self.min_chunk_size:
             return []
         
+        if self.tokenizer is not None:
+            return self._chunk_tokens(text.strip(), document_id, source, page_num)
+
         chunks = []
         start = 0
         text = text.strip()
@@ -263,6 +278,50 @@ class DocumentLoader:
         logger.info("Created %d chunks from %s", len(chunks), document_id)
         return chunks
     
+    def _chunk_tokens(self, text: str, document_id: str, source: str,
+                      page_num: Optional[int]) -> List[DocumentChunk]:
+        """Split on source offsets and verify each model input without truncation."""
+        tokens = self.tokenizer(text, add_special_tokens=False,
+                                return_offsets_mapping=True, truncation=False)
+        offsets = [(a, b) for a, b in tokens["offset_mapping"] if b > a]
+        if not offsets:
+            return []
+
+        def fits(part: str) -> bool:
+            encoded = self.tokenizer(self.token_prefix + part,
+                                     add_special_tokens=True, truncation=False)
+            return len(encoded["input_ids"]) <= self.max_tokens
+
+        chunks = []
+        first = 0
+        while first < len(offsets):
+            last = min(len(offsets), first + self.max_tokens)
+            # Retokenization at a new boundary and prefixes/special tokens may
+            # change the count. Verify the exact input used by the model.
+            while last > first and not fits(text[offsets[first][0]:offsets[last-1][1]]):
+                last -= 1
+            if last == first:
+                raise ValueError("A single token does not fit the embedding model limit")
+            if last < len(offsets):
+                segment = text[offsets[first][0]:offsets[last-1][1]]
+                boundaries = list(re.finditer(r"(?:[.!?؟؛]+[\s]+|\n\s*\n)", segment))
+                if boundaries:
+                    target = offsets[first][0] + boundaries[-1].end()
+                    candidate = next((i for i in range(last, first, -1)
+                                      if offsets[i-1][1] <= target), first)
+                    if candidate - first >= (last - first) // 2 and candidate > first:
+                        last = candidate
+            part = text[offsets[first][0]:offsets[last-1][1]].strip()
+            if not fits(part):
+                raise ValueError("Chunk exceeds the embedding model token limit")
+            if part:
+                chunks.append(DocumentChunk(part, document_id, len(chunks), source,
+                                            page_num=page_num))
+            if last == len(offsets):
+                break
+            first = max(first + 1, last - min(self.token_overlap, max(0, (last-first)//4)))
+        return chunks
+
     def load_directory(self, dir_path: str) -> List[DocumentChunk]:
         """
         Load all documents from a directory.

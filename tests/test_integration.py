@@ -286,3 +286,47 @@ def test_long_single_paragraph_is_split_without_losing_words():
     assert all(len(c.text) <= 80 and c.page_num == 7 for c in chunks)
     assert all(any(word in chunk.text.split() for chunk in chunks) for word in words)
     assert set(chunks[0].text.split()) & set(chunks[1].text.split())
+
+
+def test_arabic_token_chunks_respect_model_limit_prefix_overlap_and_page():
+    class CharacterTokenizer:
+        def __call__(self, text, add_special_tokens=True, return_offsets_mapping=False, truncation=False):
+            result = {"input_ids": list(range(len(text) + (2 if add_special_tokens else 0)))}
+            if return_offsets_mapping:
+                result["offset_mapping"] = [(i, i + 1) for i in range(len(text))]
+            return result
+    tokenizer = CharacterTokenizer()
+    text = "الجملة الأولى واضحة. الجملة الثانية تشرح الفكرة؟ الجملة الثالثة تؤكد التفاصيل. " * 3
+    loader = DocumentLoader(min_chunk_size=1, tokenizer=tokenizer, max_tokens=40,
+                            token_overlap=8, token_prefix="passage: ")
+    chunks = loader._chunk_text(text, "doc", "source", page_num=9)
+    assert len(chunks) > 2
+    assert all(c.page_num == 9 for c in chunks)
+    assert all(len(tokenizer("passage: " + c.text)["input_ids"]) <= 40 for c in chunks)
+    assert any(c.text.endswith((".", "؟")) for c in chunks[:-1])
+    assert any(set(chunks[i].text.split()) & set(chunks[i + 1].text.split())
+               for i in range(len(chunks) - 1))
+    assert text.strip()[-10:] in chunks[-1].text
+
+
+def test_embedding_rejects_inputs_above_actual_model_limit():
+    from app.services.embedding_service import EmbeddingService
+    class Tokenizer:
+        is_fast = True
+        model_max_length = 12
+        def __call__(self, text, add_special_tokens=True, truncation=False):
+            return {"input_ids": list(range(len(text) + 2))}
+    class Model:
+        tokenizer = Tokenizer()
+        max_seq_length = 10
+        default_prompt_name = "passage"
+        prompts = {"passage": "P:"}
+        def encode(self, texts, **kwargs):
+            raise AssertionError("oversized text must not reach the model")
+    service = EmbeddingService.__new__(EmbeddingService)
+    service.model = Model()
+    service._using_fallback = False
+    service.allow_fallback = False
+    service.model_name = "test"
+    with pytest.raises(ValueError, match="token limit"):
+        service.embed("1234567")

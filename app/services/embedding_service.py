@@ -106,6 +106,20 @@ class EmbeddingService:
             np.float32
         )
 
+    def chunking_config(self) -> dict:
+        """Return the actual model tokenizer and length used by encode()."""
+        if self.model is None or self._using_fallback:
+            return {}
+        tokenizer = self.model.tokenizer
+        model_limit = int(self.model.max_seq_length)
+        tokenizer_limit = int(tokenizer.model_max_length)
+        limit = min(model_limit, tokenizer_limit)
+        prompt_name = getattr(self.model, "default_prompt_name", None)
+        prefix = (getattr(self.model, "prompts", {}) or {}).get(prompt_name, "") if prompt_name else ""
+        if not getattr(tokenizer, "is_fast", False):
+            raise RuntimeError("A fast tokenizer with offset mappings is required for safe chunking")
+        return {"tokenizer": tokenizer, "max_tokens": limit, "token_prefix": prefix}
+
     def embed(self, texts: Union[str, List[str]]) -> np.ndarray:
         """Generate embeddings for a single text or list of texts."""
         if not texts:
@@ -125,12 +139,20 @@ class EmbeddingService:
         embeddings: np.ndarray
         if self.model is not None and not self._using_fallback:
             try:
+                cfg = self.chunking_config()
+                for text in texts:
+                    encoded = cfg["tokenizer"](cfg["token_prefix"] + text,
+                                                add_special_tokens=True, truncation=False)
+                    if len(encoded["input_ids"]) > cfg["max_tokens"]:
+                        raise ValueError("Embedding input exceeds the model token limit")
                 embeddings = self.model.encode(
                     texts,
                     normalize_embeddings=True,
                     show_progress_bar=False,
                 )
                 embeddings = np.asarray(embeddings, dtype=np.float32)
+            except ValueError:
+                raise
             except Exception as exc:
                 if not self.allow_fallback:
                     raise RuntimeError(

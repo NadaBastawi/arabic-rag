@@ -24,16 +24,15 @@ def reindex_pdf(pdf_path: Path, output_path: Path, workspace_id: str) -> dict[st
     if output_path.exists() and any(output_path.iterdir()):
         raise FileExistsError("Output directory must be new or empty")
 
-    loader = DocumentLoader(chunk_size=500, chunk_overlap=50)
-    chunks = loader.load_file(str(pdf_path))
-    if not chunks:
-        raise ValueError("No usable text was extracted from the PDF")
-
     embedder = EmbeddingService(
         model_name=config.EMBEDDING_MODEL,
         device=config.EMBEDDING_DEVICE,
         allow_fallback=False,
     )
+    loader = DocumentLoader(chunk_size=500, chunk_overlap=50, **embedder.chunking_config())
+    chunks = loader.load_file(str(pdf_path))
+    if not chunks:
+        raise ValueError("No usable text was extracted from the PDF")
     store = FAISSVectorStore(
         index_path=str(output_path),
         embedding_model=config.EMBEDDING_MODEL,
