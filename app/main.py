@@ -395,6 +395,9 @@ async def upload_document(
                     "chunk_id": chunk.chunk_id,
                     "page_num": chunk.page_num,
                     "added_at": now,
+                    **{key: chunk.metadata[key] for key in
+                       ("char_start", "char_end", "extraction_quality")
+                       if key in chunk.metadata},
                 }
                 for chunk in chunks
             ],

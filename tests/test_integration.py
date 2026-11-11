@@ -254,6 +254,21 @@ def test_upload_duplicate_and_selected_document_evidence(api_client, monkeypatch
     assert api_client.post("/documents/upload", files={"file": ("fake.pdf", b"not a pdf", "application/pdf")}).status_code == 415
 
 
+def test_upload_preserves_chunk_source_offsets(api_client, monkeypatch, tmp_path):
+    monkeypatch.setattr(api_main.config, "DOCS_PATH", str(tmp_path))
+    monkeypatch.setattr(api_main.document_loader, "load_file", lambda path: [
+        DocumentChunk("مقطع عربي", "ignored", 0, path, page_num=3,
+                      metadata={"char_start": 10, "char_end": 19,
+                                "extraction_quality": "text", "workspace_id": "forged"})
+    ])
+    result = api_client.post("/documents/upload", files={"file": ("arbitrary.txt", b"example", "text/plain")})
+    assert result.status_code == 200
+    chunk = api_main.vector_store.metadata[0]
+    assert (chunk["char_start"], chunk["char_end"], chunk["page_num"]) == (10, 19, 3)
+    assert chunk["extraction_quality"] == "text"
+    assert chunk["workspace_id"] != "forged"
+
+
 def test_legacy_index_without_model_manifest_is_not_assumed_compatible(embedding_service):
     from pathlib import Path
     with tempfile.TemporaryDirectory() as tmp:
