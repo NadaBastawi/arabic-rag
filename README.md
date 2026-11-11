@@ -6,7 +6,16 @@ Arabic document investigation with a FastAPI backend, FAISS retrieval, and an Ar
 
 ## Local development
 
-Use Python 3.12, install the project's pinned dependencies, and copy `.env.example` to `.env`. Set `OPENAI_API_KEY` only in the server environment, never in a browser or Git. No key is required to exercise retrieval-only behavior.
+Use Python 3.12.3, create a virtual environment, and install the pinned CPU dependencies. The first model load needs network access unless the model is already cached.
+
+```bash
+python -m venv .venv
+# Windows: .venv\Scripts\activate
+# macOS/Linux: source .venv/bin/activate
+python -m pip install -r requirements.txt
+```
+
+Copy `.env.example` to `.env`. Set `OPENAI_API_KEY` only in the server environment, never in a browser or Git. No key is required to exercise retrieval-only behavior. The lock is for the FastAPI/HTML application; the legacy Gradio UI, Gemini provider, and full CAMeL analyzer need their optional packages separately and are not part of the tested release environment.
 
 For local testing, bind to loopback and explicitly enable both development flags:
 
@@ -21,7 +30,7 @@ Open `http://127.0.0.1:8000/`. In Codespaces, only use these flags with a **priv
 
 ## Embeddings and index safety
 
-The default model is `distiluse-base-multilingual-cased-v2`, with a 128-token model sequence limit and 512-dimensional embeddings. The loader uses the active model's fast tokenizer, includes model prompts and special tokens when enforcing the limit, and keeps PDF page numbers. It checks source-character coverage for each usable page. The application fails closed if an existing nonempty index has no model manifest, or if its model, vector dimension, or schema differs.
+The default model is `distiluse-base-multilingual-cased-v2`, with a 128-token model sequence limit and 512-dimensional embeddings. Its default revision is pinned to `bfe45d0732ca50787611c0fe107ba278c7f3f889`. The loader uses the active model's fast tokenizer, includes model prompts and special tokens when enforcing the limit, and keeps PDF page numbers. It checks source-character coverage for each usable page. The application fails closed if an existing nonempty index has no model manifest, or if its model, pinned revision, vector dimension, or schema differs.
 
 An older local configuration may name `intfloat/multilingual-e5-large`; its 1,024-dimensional index has no manifest, so the model that created it cannot be verified from that index. E5 is blocked until an explicit migration implements and evaluates its distinct `query:` and `passage:` inputs. Do not point DistilUSE at that index.
 
@@ -40,11 +49,26 @@ The staged directory contains `index/` and `documents/`; the latter contains a c
 
 PDF text extraction can be imperfect. The extraction report identifies pages that require OCR; additional pages can contain corrupted characters. Citations are retrieved passages and should be checked against the original PDF.
 
+To evaluate any staged document, keep a local JSON case file outside the repository. Each entry identifies the staged document and expected **PDF** page numbers:
+
+```json
+[{"id":"example", "document_id":"DOCUMENT_ID", "question":"ما موضوع المستند؟", "expected_pages":[1]}]
+```
+
+```bash
+python -m app.evaluate_index --index /path/to/staging/index \
+  --documents /path/to/staging/documents --workspace local-user --cases /path/to/cases.json
+```
+
+The evaluator uses real configured embeddings, checks whether an expected page appears in the top results, and compares the retrieved passage offsets with the original PDF extraction. It calls no LLM and never activates the index. A passing small test set does not establish answer grounding or general retrieval quality.
+
 ## Tests
 
 ```bash
 python -m pytest -q
 ```
+
+The CI workflow installs the same locked requirements on Python 3.12.3. Docker uses the CPU lock and excludes local data and secrets from its build context; a container build must still be verified on the deployment host.
 
 Tests that use mock embeddings or a NumPy fallback do not validate the real model, FAISS, an external LLM, cloud persistence, or production authentication. Keep those checks separate when reporting results.
 

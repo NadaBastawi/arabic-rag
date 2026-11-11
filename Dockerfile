@@ -1,27 +1,15 @@
-FROM python:3.10-slim
+FROM python:3.12.3-slim
 
 WORKDIR /app
+ENV PYTHONUNBUFFERED=1 PYTHONDONTWRITEBYTECODE=1 LOG_LEVEL=INFO
 
-# Install system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    git \
-    && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt ./
+RUN python -m pip install --no-cache-dir --no-compile -r requirements.txt
 
-# Copy requirements and install Python dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Only application code and static assets enter the image. Documents, indexes,
+# credentials, tests, and local environment files are excluded from the context.
+COPY app/ ./app/
+COPY static/ ./static/
 
-# Copy application code
-COPY . .
-
-# Create data directory
-RUN mkdir -p /app/data
-
-# Expose the authenticated primary API and HTML UI
 EXPOSE 8000
-
-# Environment variables
-ENV PYTHONUNBUFFERED=1
-ENV LOG_LEVEL=INFO
-
 CMD ["python", "-m", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

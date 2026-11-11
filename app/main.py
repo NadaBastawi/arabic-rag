@@ -9,16 +9,19 @@ from __future__ import annotations
 import hashlib
 import hmac
 import logging
+import math
 import os
 import re
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
+from io import BytesIO
+from threading import Lock
 from pathlib import Path
 from typing import Any, Optional
 
 from fastapi import Depends, FastAPI, File, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
@@ -41,6 +44,7 @@ document_loader: Optional[DocumentLoader] = None
 
 security = HTTPBearer(auto_error=False)
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
+_pdf_render_lock = Lock()
 
 
 class IndexRequest(BaseModel):
@@ -74,6 +78,7 @@ def _services() -> tuple[EmbeddingService, LLMService, FAISSVectorStore, RAGPipe
         embedding_service = EmbeddingService(
             model_name=config.EMBEDDING_MODEL,
             device=config.EMBEDDING_DEVICE,
+            revision=config.effective_embedding_revision,
             allow_fallback=config.ALLOW_EMBEDDING_FALLBACK,
         )
     if llm_service is None:
@@ -89,6 +94,7 @@ def _services() -> tuple[EmbeddingService, LLMService, FAISSVectorStore, RAGPipe
             index_path=config.INDEX_PATH,
             embedding_model=config.EMBEDDING_MODEL,
             schema_version=config.INDEX_SCHEMA_VERSION,
+            embedding_revision=config.effective_embedding_revision,
         )
         vector_store.ensure_embedding_dimension(
             embedding_service.get_embedding_dimension(), reset_on_mismatch=False
@@ -202,17 +208,13 @@ async def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
-@app.get("/documents/{document_id}/file")
-async def document_file(
-    document_id: str,
-    workspace_id: str = Depends(_current_workspace),
-) -> FileResponse:
-    """Serve an uploaded source file only to its authenticated workspace."""
-    _, _, _, _ = get_services()
+def _owned_document_path(document_id: str, workspace_id: str) -> Path:
+    """Resolve a source only after validating the caller's workspace."""
+    get_services()
     try:
         InputValidator.validate_document_id(document_id)
     except ValidationError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        raise HTTPException(status_code=400, detail="Invalid document ID") from exc
     matches = [
         item for item in vector_store.metadata
         if item.get("document_id") == document_id
@@ -220,12 +222,75 @@ async def document_file(
     ] if vector_store else []
     if not matches:
         raise HTTPException(status_code=404, detail="Document not found")
-    source = str(matches[0].get("source", ""))
-    suffix = Path(source).suffix.lower()
+    suffix = Path(str(matches[0].get("source", ""))).suffix.lower()
     target = Path(config.DOCS_PATH, workspace_id, f"{document_id}{suffix}")
     if not target.is_file():
         raise HTTPException(status_code=404, detail="Document file is unavailable")
-    return FileResponse(target, media_type="application/pdf" if suffix == ".pdf" else None)
+    return target
+
+
+@app.get("/documents/{document_id}/file")
+async def document_file(document_id: str, workspace_id: str = Depends(_current_workspace)) -> FileResponse:
+    target = _owned_document_path(document_id, workspace_id)
+    return FileResponse(target, media_type="application/pdf" if target.suffix.lower() == ".pdf" else None,
+                        headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
+
+
+@app.get("/documents/{document_id}/pages")
+async def document_pages(document_id: str, workspace_id: str = Depends(_current_workspace)) -> dict[str, int]:
+    target = _owned_document_path(document_id, workspace_id)
+    if target.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=415, detail="Page viewing requires a PDF")
+    try:
+        import pypdfium2 as pdfium
+        with _pdf_render_lock:
+            document = pdfium.PdfDocument(str(target))
+            try:
+                return {"page_count": len(document)}
+            finally:
+                document.close()
+    except Exception as exc:
+        logger.warning("Unable to open a PDF for page viewing")
+        raise HTTPException(status_code=422, detail="Unable to open PDF") from exc
+
+
+@app.get("/documents/{document_id}/pages/{page_number}.png")
+async def document_page_image(document_id: str, page_number: int,
+                              workspace_id: str = Depends(_current_workspace)) -> Response:
+    target = _owned_document_path(document_id, workspace_id)
+    if target.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=415, detail="Page viewing requires a PDF")
+    try:
+        import pypdfium2 as pdfium
+        with _pdf_render_lock:
+            document = pdfium.PdfDocument(str(target))
+            try:
+                if page_number < 1 or page_number > len(document):
+                    raise HTTPException(status_code=404, detail="PDF page not found")
+                page = document[page_number - 1]
+                try:
+                    width, height = page.get_size()
+                    if not math.isfinite(width) or not math.isfinite(height) or width <= 0 or height <= 0:
+                        raise HTTPException(status_code=422, detail="Unable to render PDF page")
+                    scale = min(2.0, 1600.0 / max(width, height))
+                    bitmap = page.render(scale=scale)
+                    try:
+                        output = BytesIO()
+                        bitmap.to_pil().save(output, format="PNG")
+                        content = output.getvalue()
+                    finally:
+                        bitmap.close()
+                finally:
+                    page.close()
+            finally:
+                document.close()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        logger.warning("Unable to render a PDF page")
+        raise HTTPException(status_code=422, detail="Unable to render PDF page") from exc
+    return Response(content, media_type="image/png",
+                    headers={"Cache-Control": "private, no-store", "X-Content-Type-Options": "nosniff"})
 
 
 @app.get("/health")
@@ -397,13 +462,19 @@ async def query(
     if request.document_id:
         if request.document_id not in _registry(workspace_id):
             raise HTTPException(status_code=404, detail="Document not found")
-        # Filter after searching all workspace vectors so other documents cannot
-        # crowd the selected document out of a top-k search.
-        candidates = store.search(
-            pipeline.embedding_service.embed(question),
-            top_k=len(store.metadata), workspace_id=workspace_id,
-        )
-        docs = [d for d in candidates if d.get("document_id") == request.document_id][:request.top_k]
+        if pipeline.multi_stage_retriever and request.retrieval_mode != "basic":
+            docs = pipeline.multi_stage_retriever.retrieve(
+                question, top_k=request.top_k, workspace_id=workspace_id,
+                document_id=request.document_id,
+            )
+        else:
+            # Filter after searching all workspace vectors so other documents
+            # cannot crowd the selected document out of the results.
+            candidates = store.search(
+                pipeline.embedding_service.embed(question),
+                top_k=len(store.metadata), workspace_id=workspace_id,
+            )
+            docs = [d for d in candidates if d.get("document_id") == request.document_id][:request.top_k]
     elif request.retrieval_mode == "basic" or not pipeline.multi_stage_retriever:
         docs = store.search(
             pipeline.embedding_service.embed(question),
@@ -450,7 +521,7 @@ async def query(
 
 @app.get("/stats")
 async def stats(workspace_id: str = Depends(_current_workspace)) -> dict[str, Any]:
-    _, _, store, _ = get_services()
-    result = store.get_stats()
-    result["workspace_documents"] = len(_registry(workspace_id))
-    return result
+    get_services()
+    documents = _registry(workspace_id)
+    return {"workspace_documents": len(documents),
+            "workspace_chunks": sum(doc.chunk_count for doc in documents.values())}

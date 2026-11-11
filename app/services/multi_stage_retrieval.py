@@ -11,8 +11,74 @@ This module provides multi-stage retrieval that combines:
 """
 
 from typing import List, Dict, Optional, Tuple
+import math
+import re
 import numpy as np
 from app.utils.arabic_morphology import LightArabicAnalyzer
+from app.utils.arabic_preprocessing import normalize_arabic
+
+_TOKEN = re.compile(r"[\u0621-\u064aA-Za-z0-9]+")
+_STOP = {"ما", "من", "ومن", "في", "عن", "على", "الي", "هل", "هو", "هي", "قام", "كان", "كيف", "هذا", "هذه", "التي", "الذي"}
+
+
+def _terms(text: str) -> List[str]:
+    words = _TOKEN.findall(normalize_arabic(text).lower())
+    return [w[2:] if w.startswith("ال") and len(w) > 4 else w for w in words]
+
+
+def _query_groups(query: str) -> List[Tuple[str, ...]]:
+    groups = []
+    for term in _terms(query):
+        if term in _STOP or len(term) < 3:
+            continue
+        if term in {"مولف", "كاتب", "تاليف", "مؤلف"}:
+            group = ("مولف", "تاليف", "كاتب")
+        elif "ترجم" in term:
+            group = ("ترجم", "مترجم")
+        else:
+            group = (term,)
+        if group not in groups:
+            groups.append(group)
+    return groups
+
+
+def hybrid_candidates(store, query_embedding, query: str, top_k: int,
+                      workspace_id: Optional[str] = None,
+                      document_id: Optional[str] = None) -> List[Dict]:
+    """Rank only the caller's documents with semantic and Arabic lexical signals."""
+    total = len(getattr(store, "metadata", getattr(store, "texts", [])))
+    if total <= 0:
+        return []
+    if workspace_id is None:
+        docs = store.search(query_embedding, top_k=total)
+    else:
+        docs = store.search(query_embedding, top_k=total, workspace_id=workspace_id)
+    if document_id is not None:
+        docs = [doc for doc in docs if doc.get("document_id") == document_id]
+    groups = _query_groups(query)
+    if not docs or not groups:
+        return docs[:top_k]
+    matched = []
+    frequencies = [0] * len(groups)
+    for doc in docs:
+        words = set(_terms(doc.get("text", "")))
+        flags = [any(word.startswith(prefix) for word in words for prefix in group)
+                 for group in groups]
+        matched.append(flags)
+        for i, flag in enumerate(flags):
+            frequencies[i] += int(flag)
+    weights = [1.0 + math.log((len(docs) + 1) / (count + 1)) for count in frequencies]
+    denominator = sum(weights)
+    results = []
+    for doc, flags in zip(docs, matched):
+        lexical = sum(weight for weight, hit in zip(weights, flags) if hit) / denominator
+        item = dict(doc)
+        item["semantic_score"] = float(doc.get("score", 0.0))
+        item["hybrid_lexical_score"] = lexical
+        item["score"] = 0.25 * item["semantic_score"] + 0.75 * lexical
+        results.append(item)
+    results.sort(key=lambda doc: doc["score"], reverse=True)
+    return results[:top_k]
 
 
 class ArabicReRanker:
@@ -193,6 +259,7 @@ class MultiStageRetriever:
         query: str,
         top_k: int = 5,
         workspace_id: Optional[str] = None,
+        document_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve relevant documents using multi-stage approach.
@@ -205,14 +272,9 @@ class MultiStageRetriever:
             List of relevant documents with scores.
         """
         query_embedding = self.embedding_service.embed(query)
-        
-        if workspace_id is None:
-            candidates = self.vector_store.search(query_embedding, top_k=self.initial_top_k)
-        else:
-            candidates = self.vector_store.search(
-                query_embedding, top_k=self.initial_top_k, workspace_id=workspace_id
-            )
-        
+        candidates = hybrid_candidates(self.vector_store, query_embedding, query,
+                                       self.initial_top_k, workspace_id, document_id)
+
         if not candidates:
             return []
         
@@ -331,6 +393,7 @@ class AdaptiveRetrieval:
         query: str,
         top_k: int = 5,
         workspace_id: Optional[str] = None,
+        document_id: Optional[str] = None,
     ) -> List[Dict]:
         """
         Retrieve with adaptive strategy selection.
@@ -358,4 +421,5 @@ class AdaptiveRetrieval:
             reranker=adaptive_reranker
         )
         
-        return retriever.retrieve(query, top_k, workspace_id=workspace_id)
+        return retriever.retrieve(query, top_k, workspace_id=workspace_id,
+                                  document_id=document_id)

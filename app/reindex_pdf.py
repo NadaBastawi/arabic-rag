@@ -37,6 +37,7 @@ def reindex_pdf(pdf_path: Path, output_path: Path, workspace_id: str) -> dict[st
     embedder = EmbeddingService(
         model_name=config.EMBEDDING_MODEL,
         device=config.EMBEDDING_DEVICE,
+        revision=config.effective_embedding_revision,
         allow_fallback=False,
     )
     loader = DocumentLoader(chunk_size=500, chunk_overlap=50, **embedder.chunking_config())
@@ -62,6 +63,7 @@ def reindex_pdf(pdf_path: Path, output_path: Path, workspace_id: str) -> dict[st
         index_path=str(index_path),
         embedding_model=config.EMBEDDING_MODEL,
         schema_version=config.INDEX_SCHEMA_VERSION,
+        embedding_revision=config.effective_embedding_revision,
     )
     now = datetime.now(timezone.utc).isoformat()
     store.add_documents(
@@ -82,7 +84,8 @@ def reindex_pdf(pdf_path: Path, output_path: Path, workspace_id: str) -> dict[st
         ],
     )
     reopened = FAISSVectorStore(str(index_path), embedding_model=config.EMBEDDING_MODEL,
-                                schema_version=config.INDEX_SCHEMA_VERSION)
+                                schema_version=config.INDEX_SCHEMA_VERSION,
+                                embedding_revision=config.effective_embedding_revision)
     reopened.ensure_embedding_dimension(embedder.get_embedding_dimension())
     if reopened.get_stats()["total_vectors"] != len(chunks):
         raise RuntimeError("Reindexed vector count does not match extracted chunks")

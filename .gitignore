@@ -76,8 +76,7 @@ htmlcov/
 site/
 docs/_build/
 
-# Docker
-.dockerignore
+# Docker build context is controlled by the tracked .dockerignore.
 
 # OS
 thumbs.db

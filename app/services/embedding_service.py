@@ -24,16 +24,21 @@ class EmbeddingService:
 
     def __init__(
         self,
-        model_name: str = "intfloat/multilingual-e5-large",
+        model_name: str = "distiluse-base-multilingual-cased-v2",
         device: str | None = None,
         fallback_dimension: int = 384,
         allow_fallback: bool = False,
+        revision: str | None = None,
     ):
         # E5 requires distinct query/passage prefixes. Refuse it until an
         # explicit migration implements and evaluates both paths.
         if re.match(r"(?:multilingual-)?e5-", model_name.rsplit("/", 1)[-1], re.IGNORECASE):
             raise ValueError("E5 requires an explicit migration with query and passage prefixes")
         self.model_name = model_name
+        self.revision = revision or (
+            "bfe45d0732ca50787611c0fe107ba278c7f3f889"
+            if model_name.rsplit("/", 1)[-1] == "distiluse-base-multilingual-cased-v2" else None
+        )
         self.device = self._normalize_device(device)
         self.fallback_dimension = fallback_dimension
         self.allow_fallback = allow_fallback
@@ -68,7 +73,7 @@ class EmbeddingService:
             return
 
         try:
-            self.model = SentenceTransformer(self.model_name, device=self.device)
+            self.model = SentenceTransformer(self.model_name, device=self.device, revision=self.revision)
             self._using_fallback = False
         except Exception as exc:
             if not self.allow_fallback:

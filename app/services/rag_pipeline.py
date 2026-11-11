@@ -109,7 +109,7 @@ class RAGPipeline:
                     question,
                     retrieved_docs,
                     reason=(
-                        "LLM quota/rate limit reached, so I am returning a quick extract from your documents."
+                        "تعذر توليد الإجابة بسبب حد الطلبات أو الرصيد. هذه مقاطع مسترجعة وليست إجابة مولدة."
                     ),
                 )
             if answer == LLMService.LLM_API_UNAVAILABLE:
@@ -117,7 +117,7 @@ class RAGPipeline:
                     question,
                     retrieved_docs,
                     reason=(
-                        "LLM API is unavailable or API key is missing, so I am returning a quick extract from your documents."
+                        "تعذر توليد إجابة لأن الخدمة غير متاحة أو لم تُهيّأ. هذه مقاطع مسترجعة وليست إجابة مولدة."
                     ),
                 )
             if answer in {
@@ -135,7 +135,7 @@ class RAGPipeline:
                 return self._build_retrieval_fallback(
                     question,
                     retrieved_docs,
-                    reason="LLM generation failed, so I am returning a quick extract from your documents.",
+                    reason="تعذر توليد إجابة. هذه مقاطع مسترجعة وليست إجابة مولدة.",
                 )
 
             return answer
@@ -154,7 +154,7 @@ class RAGPipeline:
         if not retrieved_docs:
             return (
                 f"{reason}\n\n"
-                "No relevant passages were found in the indexed documents for this question."
+                "لم تُعثر على مقاطع ذات صلة في المستندات المفهرسة."
             )
 
         terms = RAGPipeline._query_terms(question)
@@ -185,11 +185,11 @@ class RAGPipeline:
             )
 
         if not candidates:
-            return f"{reason}\n\nNo clean passages were extracted from the retrieved chunks."
+            return f"{reason}\n\nلم تُعثر على مقاطع واضحة في النتائج المسترجعة."
 
         candidates.sort(key=lambda item: (item["overlap"], item["score"]), reverse=True)
 
-        lines = [reason, "", "Quick evidence from your docs:"]
+        lines = [reason, "", "مقاطع مسترجعة من مستنداتك:"]
         for idx, item in enumerate(candidates[:2], 1):
             lines.append(f"{idx}. {item['snippet'][:180]}")
         return "\n".join(lines)

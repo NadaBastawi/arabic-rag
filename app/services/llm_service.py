@@ -78,7 +78,7 @@ class LLMService:
     def _init_api_client(self) -> None:
         """Initialize API client for external LLM."""
         if not self.api_key:
-            logger.warning("No API key provided, using mock client")
+            logger.warning("No API key provided; generation is unavailable")
             self._client = None
             return
         

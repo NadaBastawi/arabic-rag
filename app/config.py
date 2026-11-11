@@ -43,6 +43,16 @@ class Config:
     EMBEDDING_MODEL: str = _environment_value(
         "EMBEDDING_MODEL", "distiluse-base-multilingual-cased-v2"
     )
+    EMBEDDING_REVISION: str = _environment_value("EMBEDDING_REVISION")
+
+    @property
+    def effective_embedding_revision(self) -> Optional[str]:
+        if self.EMBEDDING_REVISION:
+            return self.EMBEDDING_REVISION
+        if self.EMBEDDING_MODEL.rsplit("/", 1)[-1] == "distiluse-base-multilingual-cased-v2":
+            return "bfe45d0732ca50787611c0fe107ba278c7f3f889"
+        return None
+
     EMBEDDING_DEVICE: Optional[str] = _environment_value("EMBEDDING_DEVICE") or None
     ALLOW_EMBEDDING_FALLBACK: bool = (
         _environment_value("ALLOW_EMBEDDING_FALLBACK", "false").lower() == "true"

@@ -1,0 +1,15 @@
+**
+!requirements.txt
+!app/
+!app/**
+!static/
+!static/**
+**/__pycache__/
+**/*.pyc
+**/.env*
+**/*.pdf
+**/*.docx
+**/*.faiss
+**/*.npy
+**/*.log
+**/data/**

@@ -374,3 +374,57 @@ def test_token_chunks_cover_source_characters_the_tokenizer_skips():
         assert chunk.text == text[a:b]
         covered.update(range(a, b))
     assert all(i in covered for i, char in enumerate(text) if not char.isspace())
+
+
+def test_stats_do_not_expose_other_workspaces_or_server_paths(api_client, monkeypatch):
+    monkeypatch.setattr(api_main.config, 'AUTH_WORKSPACE_ID', 'a')
+    store = api_main.vector_store
+    store.add_documents(['نص أول', 'نص ثان'], np.ones((2, 48), dtype=np.float32),
+                        ['a-doc', 'b-doc'], metadata_list=[{'workspace_id': 'a'}, {'workspace_id': 'b'}])
+    response = api_client.get('/stats')
+    assert response.status_code == 200
+    assert response.json() == {'workspace_documents': 1, 'workspace_chunks': 1}
+
+
+def test_pdf_page_images_are_scoped_and_match_page_number(api_client, monkeypatch, tmp_path):
+    from PyPDF2 import PdfWriter
+    monkeypatch.setattr(api_main.config, 'DOCS_PATH', str(tmp_path))
+    monkeypatch.setattr(api_main.config, 'AUTH_WORKSPACE_ID', 'a')
+    folder = tmp_path / 'a'
+    folder.mkdir()
+    writer = PdfWriter()
+    writer.add_blank_page(width=200, height=250)
+    writer.add_blank_page(width=250, height=200)
+    with (folder / 'doc.pdf').open('wb') as f:
+        writer.write(f)
+    api_main.vector_store.add_documents(['page one'], np.ones((1, 48), dtype=np.float32),
+        ['doc'], ['sample.pdf'], [{'workspace_id': 'a', 'page_num': 1}])
+    response = api_client.get('/documents/doc/pages')
+    assert response.status_code == 200 and response.json() == {'page_count': 2}
+    image = api_client.get('/documents/doc/pages/2.png')
+    assert image.status_code == 200 and image.headers['content-type'] == 'image/png'
+    assert image.content.startswith(b'\x89PNG\r\n\x1a\n')
+    assert image.headers['cache-control'] == 'private, no-store'
+    assert api_client.get('/documents/doc/pages/3.png').status_code == 404
+    monkeypatch.setattr(api_main.config, 'AUTH_WORKSPACE_ID', 'b')
+    assert api_client.get('/documents/doc/pages').status_code == 404
+    assert api_client.get('/documents/doc/pages/1.png').status_code == 404
+
+
+def test_index_rejects_changed_or_missing_model_revision_without_deleting_data(embedding_service):
+    from pathlib import Path
+    import json
+    with tempfile.TemporaryDirectory() as tmp:
+        store = FAISSVectorStore(tmp, embedding_model='model-a', embedding_revision='revision-a')
+        store.add_documents(['نص محفوظ'], embedding_service.embed(['نص محفوظ']))
+        wrong = FAISSVectorStore(tmp, embedding_model='model-a', embedding_revision='revision-b')
+        with pytest.raises(ValueError, match='revision'):
+            wrong.ensure_embedding_dimension(embedding_service.dim)
+        manifest = Path(tmp, 'manifest.json')
+        data = json.loads(manifest.read_text(encoding='utf-8'))
+        del data['embedding_revision']
+        manifest.write_text(json.dumps(data), encoding='utf-8')
+        unknown = FAISSVectorStore(tmp, embedding_model='model-a', embedding_revision='revision-a')
+        with pytest.raises(ValueError, match='revision'):
+            unknown.ensure_embedding_dimension(embedding_service.dim)
+        assert len(unknown.metadata) == 1

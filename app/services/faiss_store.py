@@ -27,6 +27,7 @@ class FAISSVectorStore:
         index_path: str = "./data/index",
         embedding_model: Optional[str] = None,
         schema_version: int = 1,
+        embedding_revision: Optional[str] = None,
     ):
         self.index_path = index_path
         self.index_file = os.path.join(index_path, "index.faiss")
@@ -34,6 +35,7 @@ class FAISSVectorStore:
         self.numpy_embeddings_path = os.path.join(index_path, "embeddings.npy")
         self.manifest_path = os.path.join(index_path, "manifest.json")
         self.embedding_model = embedding_model
+        self.embedding_revision = embedding_revision
         self.schema_version = schema_version
         self._manifest: Dict = {}
 
@@ -116,6 +118,9 @@ class FAISSVectorStore:
 
         if self.metadata and self.embedding_model and not self._manifest.get("embedding_model"):
             raise ValueError("Index embedding model is unknown; verify the original model or reindex separately")
+        stored_revision = self._manifest.get("embedding_revision")
+        if self.metadata and self.embedding_revision and stored_revision != self.embedding_revision:
+            raise ValueError("Index embedding revision is missing or incompatible; explicit reindex required")
         stored_model = self._manifest.get("embedding_model")
         stored_schema = self._manifest.get("schema_version")
         if stored_schema is not None and stored_schema != self.schema_version:
@@ -321,6 +326,7 @@ class FAISSVectorStore:
         self._manifest = {
             "schema_version": self.schema_version,
             "embedding_model": self.embedding_model,
+            "embedding_revision": self.embedding_revision,
             "embedding_dimension": self._embedding_dim,
             "backend": self._backend,
         }

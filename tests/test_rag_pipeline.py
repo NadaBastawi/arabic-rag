@@ -134,5 +134,5 @@ def test_pipeline_falls_back_when_llm_quota_exceeded():
     )
 
     answer = pipeline.answer("what does the doc say about retrieval?")
-    assert "quota/rate limit reached" in answer.lower()
-    assert "quick evidence from your docs" in answer.lower()
+    assert "حد الطلبات أو الرصيد" in answer
+    assert "مقاطع مسترجعة" in answer
