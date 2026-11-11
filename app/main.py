@@ -28,8 +28,11 @@ from pydantic import BaseModel, Field
 
 from app.config import config
 from app.services.embedding_service import EmbeddingService
-from app.services.faiss_store import FAISSVectorStore
+from app.services.faiss_store import FAISSVectorStore, sync_directory
 from app.services.llm_service import LLMService
+from app.services.production_security import (
+    single_writer, validate_browser_write, validate_production_config, workspace_for_request,
+)
 from app.services.rag_pipeline import RAGPipeline
 from app.utils.document_loader import DocumentLoader
 from app.utils.errors import InputValidator, ValidationError
@@ -95,6 +98,7 @@ def _services() -> tuple[EmbeddingService, LLMService, FAISSVectorStore, RAGPipe
             embedding_model=config.EMBEDDING_MODEL,
             schema_version=config.INDEX_SCHEMA_VERSION,
             embedding_revision=config.effective_embedding_revision,
+            atomic=config.is_production,
         )
         vector_store.ensure_embedding_dimension(
             embedding_service.get_embedding_dimension(), reset_on_mismatch=False
@@ -128,10 +132,11 @@ def _current_workspace(
     An empty token is never accepted when authentication is enabled.  This
     avoids silently running a production deployment without an auth boundary.
     """
-    # No production identity integration is configured yet. Never accept
-    # development flags or a shared token as a production identity.
     if config.is_production:
-        raise HTTPException(status_code=503, detail="Production authentication is not configured")
+        if config.LOCAL_DEV_MODE or config.PRIVATE_DEV_MODE or os.getenv("WEBSITE_AUTH_ENABLED", "").lower() != "true":
+            raise HTTPException(status_code=503, detail="Production authentication is not configured")
+        validate_browser_write(request)
+        return workspace_for_request(request)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", config.AUTH_WORKSPACE_ID):
         raise HTTPException(status_code=500, detail="Authentication workspace is misconfigured")
     if config.LOCAL_DEV_MODE and config.PRIVATE_DEV_MODE:
@@ -185,7 +190,12 @@ def _registry(workspace_id: str) -> dict[str, DocumentInfo]:
 async def lifespan(_: FastAPI):
     logger.info("Starting Arabic RAG API")
     if config.is_production:
-        raise RuntimeError("Production authentication and durable storage must be configured before deployment")
+        mount = validate_production_config(config)
+        with single_writer(mount):
+            get_services()
+            yield
+        logger.info("Shutting down Arabic RAG API")
+        return
     get_services()
     yield
     logger.info("Shutting down Arabic RAG API")
@@ -376,7 +386,12 @@ async def upload_document(
     Path(config.DOCS_PATH, workspace_id).mkdir(parents=True, exist_ok=True)
     document_id = uuid.uuid4().hex
     target = Path(config.DOCS_PATH, workspace_id, f"{document_id}{suffix}")
-    target.write_bytes(data)
+    with target.open("xb") as source_file:
+        source_file.write(data)
+        source_file.flush()
+        os.fsync(source_file.fileno())
+    if config.is_production:
+        sync_directory(str(target.parent))
     try:
         chunks = document_loader.load_file(str(target)) if document_loader else []
         if not chunks:
@@ -417,7 +432,11 @@ async def upload_document(
         target.unlink(missing_ok=True)
         raise
     except Exception:
-        target.unlink(missing_ok=True)
+        # A failure after publishing a snapshot can still leave a committed
+        # document. Keep its source whenever the recovered index references it.
+        if not any(item.get("document_id") == document_id and item.get("workspace_id") == workspace_id
+                   for item in store.metadata):
+            target.unlink(missing_ok=True)
         logger.exception("Document upload processing failed")
         raise HTTPException(status_code=500, detail="Document processing failed")
 

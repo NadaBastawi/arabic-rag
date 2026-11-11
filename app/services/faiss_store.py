@@ -7,11 +7,40 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
+import uuid
+from functools import wraps
+from threading import RLock
 from typing import Dict, List, Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
+
+
+def sync_directory(path: str) -> None:
+    """Flush directory entries on Linux; Windows uses its own file semantics."""
+    if os.name == "nt":
+        return
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _serialized_mutation(method):
+    """Serialize mutations and reload the last committed snapshot after failure."""
+    @wraps(method)
+    def wrapped(self, *args, **kwargs):
+        with self._write_lock:
+            try:
+                return method(self, *args, **kwargs)
+            except Exception:
+                if self.atomic:
+                    self._load()
+                raise
+    return wrapped
 
 
 class FAISSVectorStore:
@@ -28,12 +57,12 @@ class FAISSVectorStore:
         embedding_model: Optional[str] = None,
         schema_version: int = 1,
         embedding_revision: Optional[str] = None,
+        atomic: bool = False,
     ):
         self.index_path = index_path
-        self.index_file = os.path.join(index_path, "index.faiss")
-        self.metadata_path = os.path.join(index_path, "metadata.json")
-        self.numpy_embeddings_path = os.path.join(index_path, "embeddings.npy")
-        self.manifest_path = os.path.join(index_path, "manifest.json")
+        self.atomic = atomic or os.path.exists(os.path.join(index_path, "CURRENT"))
+        self._write_lock = RLock()
+        self._set_paths(index_path)
         self.embedding_model = embedding_model
         self.embedding_revision = embedding_revision
         self.schema_version = schema_version
@@ -51,6 +80,26 @@ class FAISSVectorStore:
         self._faiss = None
 
         self._load()
+
+    def _set_paths(self, directory: str) -> None:
+        self.index_file = os.path.join(directory, "index.faiss")
+        self.metadata_path = os.path.join(directory, "metadata.json")
+        self.numpy_embeddings_path = os.path.join(directory, "embeddings.npy")
+        self.manifest_path = os.path.join(directory, "manifest.json")
+
+    def _select_generation(self) -> None:
+        pointer = os.path.join(self.index_path, "CURRENT")
+        if not self.atomic or not os.path.exists(pointer):
+            self._set_paths(self.index_path)
+            return
+        with open(pointer, encoding="ascii") as f:
+            generation = f.read().strip()
+        if not re.fullmatch(r"[0-9a-f]{32}", generation):
+            raise RuntimeError("Invalid index generation pointer")
+        directory = os.path.join(self.index_path, "generations", generation)
+        if not os.path.isdir(directory):
+            raise RuntimeError("Index generation is missing; restore a backup")
+        self._set_paths(directory)
 
     def _normalize(self, vectors: np.ndarray) -> np.ndarray:
         vectors = np.asarray(vectors, dtype=np.float32)
@@ -87,6 +136,8 @@ class FAISSVectorStore:
 
     def clear(self) -> None:
         """Clear all vectors and persisted index artifacts."""
+        if self.atomic:
+            raise RuntimeError("Destructive reset is unavailable for snapshot indexes")
         self.index = None
         self.metadata = []
         self._embeddings_np = None
@@ -164,6 +215,7 @@ class FAISSVectorStore:
     def _metadata_map(self) -> Dict[int, Dict]:
         return {int(item["faiss_id"]): item for item in self.metadata}
 
+    @_serialized_mutation
     def add_documents(
         self,
         texts: List[str],
@@ -288,6 +340,7 @@ class FAISSVectorStore:
             "metadata": {k: v for k, v in meta.items() if k not in excluded},
         }
 
+    @_serialized_mutation
     def delete_document(self, document_id: str, workspace_id: Optional[str] = None) -> bool:
         ids_to_remove = [
             int(item["faiss_id"])
@@ -316,6 +369,12 @@ class FAISSVectorStore:
         return True
 
     def _save(self) -> None:
+        if self.atomic:
+            self._save_generation()
+            return
+        self._write_files()
+
+    def _write_files(self) -> None:
         if self._backend == "faiss" and self.index is not None:
             self._faiss.write_index(self.index, self.index_file)
         elif self._embeddings_np is not None:
@@ -333,7 +392,33 @@ class FAISSVectorStore:
         with open(self.manifest_path, "w", encoding="utf-8") as f:
             json.dump(self._manifest, f, ensure_ascii=False, indent=2)
 
+    def _save_generation(self) -> None:
+        generation = uuid.uuid4().hex
+        directory = os.path.join(self.index_path, "generations", generation)
+        os.makedirs(directory, exist_ok=False)
+        self._set_paths(directory)
+        self._write_files()
+        for path in (self.index_file, self.numpy_embeddings_path, self.metadata_path, self.manifest_path):
+            if os.path.exists(path):
+                with open(path, "r+b") as f:
+                    os.fsync(f.fileno())
+        sync_directory(directory)
+        sync_directory(os.path.dirname(directory))
+        temporary = os.path.join(self.index_path, f".CURRENT-{generation}")
+        with open(temporary, "x", encoding="ascii") as f:
+            f.write(generation + "\n")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(temporary, os.path.join(self.index_path, "CURRENT"))
+        sync_directory(self.index_path)
+
     def _load(self) -> None:
+        self.index = None
+        self.metadata = []
+        self._embeddings_np = None
+        self._embedding_dim = None
+        self._manifest = {}
+        self._select_generation()
         self._init_backend()
 
         if os.path.exists(self.manifest_path):

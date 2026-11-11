@@ -116,3 +116,79 @@ def test_azure_environment_cannot_use_development_bypass(monkeypatch):
     with pytest.raises(HTTPException) as rejected:
         main._current_workspace(request, None)
     assert rejected.value.status_code == 503
+
+
+def test_entra_identity_is_tenant_scoped_allowlisted_and_requires_same_origin(monkeypatch):
+    import base64
+    import json
+    from app.services.production_security import workspace_for_request, validate_browser_write
+
+    tenant = "11111111-1111-4111-8111-111111111111"
+    user = "22222222-2222-4222-8222-222222222222"
+    monkeypatch.setenv("DALIL_TENANT_ID", tenant)
+    monkeypatch.setenv("DALIL_ALLOWED_USER_IDS", user)
+    monkeypatch.setenv("WEBSITE_HOSTNAME", "pilot.azurewebsites.net")
+    def request_for(oid, origin="https://pilot.azurewebsites.net", marker="1"):
+        payload = {"auth_typ": "aad", "claims": [{"typ": "tid", "val": tenant}, {"typ": "oid", "val": oid}]}
+        encoded = base64.b64encode(json.dumps(payload).encode())
+        return Request({"type": "http", "method": "POST", "headers": [
+            (b"x-ms-client-principal", encoded), (b"origin", origin.encode()),
+            (b"x-dalil-request", marker.encode())]})
+    good = request_for(user)
+    assert len(workspace_for_request(good)) == 64
+    validate_browser_write(good)
+    with pytest.raises(HTTPException):
+        workspace_for_request(request_for("33333333-3333-4333-8333-333333333333"))
+    with pytest.raises(HTTPException):
+        validate_browser_write(request_for(user, origin="https://evil.example"))
+    with pytest.raises(HTTPException):
+        validate_browser_write(request_for(user, marker=""))
+
+
+def test_production_configuration_fails_closed(monkeypatch, tmp_path):
+    import json
+    from app.services.production_security import validate_production_config
+    monkeypatch.setattr(main.config, "LOCAL_DEV_MODE", False)
+    monkeypatch.setattr(main.config, "PRIVATE_DEV_MODE", False)
+    monkeypatch.setattr(main.config, "ALLOW_EMBEDDING_FALLBACK", False)
+    monkeypatch.setattr(main.config, "INDEX_PATH", str(tmp_path / "index"))
+    monkeypatch.setattr(main.config, "DOCS_PATH", str(tmp_path / "documents"))
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "dalil")
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "true")
+    monkeypatch.setenv("WEBSITE_HOSTNAME", "pilot.azurewebsites.net")
+    monkeypatch.setenv("DALIL_TENANT_ID", "11111111-1111-4111-8111-111111111111")
+    monkeypatch.setenv("DALIL_ALLOWED_USER_IDS", "22222222-2222-4222-8222-222222222222")
+    monkeypatch.setenv("DALIL_DATA_MOUNT", str(tmp_path))
+    monkeypatch.setattr("app.services.production_security.os.path.ismount", lambda _: True)
+    auth = {"platform": {"enabled": True}, "globalValidation": {"requireAuthentication": True,
+        "unauthenticatedClientAction": "RedirectToLoginPage", "excludedPaths": []},
+        "identityProviders": {"azureActiveDirectory": {"enabled": True}},
+        "httpSettings": {"requireHttps": True}}
+    monkeypatch.setenv("WEBSITE_AUTH_V2_CONFIG_JSON", json.dumps(auth))
+    assert validate_production_config(main.config) == tmp_path.resolve()
+    auth["globalValidation"]["requireAuthentication"] = False
+    monkeypatch.setenv("WEBSITE_AUTH_V2_CONFIG_JSON", json.dumps(auth))
+    with pytest.raises(RuntimeError):
+        validate_production_config(main.config)
+    auth["globalValidation"]["requireAuthentication"] = True
+    monkeypatch.setenv("WEBSITE_AUTH_V2_CONFIG_JSON", json.dumps(auth))
+    monkeypatch.setattr("app.services.production_security.os.path.ismount", lambda _: False)
+    with pytest.raises(RuntimeError):
+        validate_production_config(main.config)
+
+
+def test_single_writer_excludes_another_process(tmp_path):
+    import os
+    import subprocess
+    import sys
+    if os.name == "nt":
+        pytest.skip("Azure App Service pilot uses Linux file locks")
+    from app.services.production_security import single_writer
+    code = ("from pathlib import Path; from app.services.production_security import single_writer; "
+            "import sys; lock=single_writer(Path(sys.argv[1])); lock.__enter__()")
+    with single_writer(tmp_path):
+        attempted = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True)
+        assert attempted.returncode != 0
+        assert "Another DALIL instance holds the data lock" in attempted.stderr
+    released = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True)
+    assert released.returncode == 0

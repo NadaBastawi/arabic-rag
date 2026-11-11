@@ -2,7 +2,7 @@
 
 Arabic document investigation with a FastAPI backend, FAISS retrieval, and an Arabic-first web interface. OpenAI generation is optional for local retrieval testing and requires a server-side key for generated answers.
 
-> **Not production-ready.** Production identity, durable storage, safe concurrent writes, and a real OpenAI end-to-end test have not been verified. The application refuses startup on Azure App Service or when `APP_ENV=production`. Do not expose a development instance publicly.
+> **Azure pilot is not yet verified.** The app fails closed unless its App Service identity and mounted storage checks pass. The Azure mount, real sign-in, backup recovery, and real OpenAI end-to-end test must be verified on the actual deployment before relying on it. Do not expose a development instance publicly.
 
 ## Local development
 
@@ -71,6 +71,14 @@ python -m pytest -q
 The CI workflow installs the same locked requirements on Python 3.12.3. Docker uses the CPU lock and excludes local data and secrets from its build context; a container build must still be verified on the deployment host.
 
 Tests that use mock embeddings or a NumPy fallback do not validate the real model, FAISS, an external LLM, cloud persistence, or production authentication. Keep those checks separate when reporting results.
+
+## Private Azure pilot
+
+The pilot uses a Linux custom container, exactly one App Service instance and one Uvicorn worker. Configure App Service authentication to require Microsoft Entra ID sign-in for every path and HTTPS, with no excluded paths. Restrict the application registration to the chosen tenant and restrict access to the pilot's approved user object IDs. The application checks both the tenant and user ID from App Service's injected identity claims; it derives a separate workspace from those IDs. Never forward identity headers from a separately exposed reverse proxy.
+
+Mount an Azure Files share at a dedicated mount point (for example `/mounts/dalil`) and configure `APP_ENV=production`, `DALIL_DATA_MOUNT=/mounts/dalil`, `INDEX_PATH=/mounts/dalil/index`, and `DOCS_PATH=/mounts/dalil/documents`. Set `DALIL_TENANT_ID` and comma-separated `DALIL_ALLOWED_USER_IDS` to the tenant ID and approved Entra user **object IDs**, respectively. Set `LOCAL_DEV_MODE=false`, `PRIVATE_DEV_MODE=false`, `ALLOW_EMBEDDING_FALLBACK=false`, and inject `OPENAI_API_KEY` through an Azure app setting or Key Vault reference; never commit the key. App Service supplies `WEBSITE_AUTH_ENABLED`, `WEBSITE_AUTH_V2_CONFIG_JSON`, and `WEBSITE_HOSTNAME`.
+
+The app verifies the mounted path and authentication settings during startup, holds an exclusive filesystem lock for its lifetime, and saves index updates to a new generation before switching the `CURRENT` pointer. Earlier generations are retained as local recovery copies; configure separate Azure Files backups and test restoration. The lock, flush and rename behavior must be tested on the actual Azure Files mount, and the service must not be scaled to multiple instances or workers. Do not switch an old index or test document into production without an explicit migration and access review.
 
 ## API
 

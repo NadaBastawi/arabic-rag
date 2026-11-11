@@ -102,6 +102,29 @@ def test_vector_store_add_search_delete_and_persist(embedding_service):
         assert len(reloaded.metadata) == len(store.metadata)
 
 
+def test_snapshot_save_failure_keeps_committed_index_and_memory(tmp_path, monkeypatch):
+    import os
+
+    store = FAISSVectorStore(str(tmp_path), atomic=True)
+    store.add_documents(["first"], np.array([[1.0, 0.0]], dtype=np.float32), ["first"])
+    previous = (tmp_path / "CURRENT").read_text()
+
+    def fail_replace(*args):
+        raise OSError("injected commit failure")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(os, "replace", fail_replace)
+        with pytest.raises(OSError, match="injected commit failure"):
+            store.add_documents(["second"], np.array([[0.0, 1.0]], dtype=np.float32), ["second"])
+    assert (tmp_path / "CURRENT").read_text() == previous
+    assert [item["document_id"] for item in store.metadata] == ["first"]
+    reopened = FAISSVectorStore(str(tmp_path), atomic=True)
+    assert [item["document_id"] for item in reopened.metadata] == ["first"]
+    store.add_documents(["third"], np.array([[0.0, 1.0]], dtype=np.float32), ["third"])
+    assert len(list((tmp_path / "generations").iterdir())) >= 2
+    assert [item["document_id"] for item in FAISSVectorStore(str(tmp_path), atomic=True).metadata] == ["first", "third"]
+
+
 def test_vector_store_dimension_mismatch_can_reset(embedding_service):
     with tempfile.TemporaryDirectory() as tmp:
         store = FAISSVectorStore(index_path=tmp)
