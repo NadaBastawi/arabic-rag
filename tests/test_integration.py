@@ -125,6 +125,29 @@ def test_snapshot_save_failure_keeps_committed_index_and_memory(tmp_path, monkey
     assert [item["document_id"] for item in FAISSVectorStore(str(tmp_path), atomic=True).metadata] == ["first", "third"]
 
 
+def test_rejected_remote_pointer_preserves_old_generation(tmp_path):
+    class Pointer:
+        value = ""
+        rejected = False
+        def read(self):
+            return self.value
+        def write(self, value):
+            if self.rejected:
+                raise RuntimeError("lease lost")
+            self.value = value
+    pointer = Pointer()
+    store = FAISSVectorStore(str(tmp_path), atomic=True, pointer_store=pointer)
+    store.add_documents(["first"], np.array([[1.0, 0.0]], dtype=np.float32), ["first"])
+    previous = pointer.value
+    pointer.rejected = True
+    with pytest.raises(RuntimeError, match="lease lost"):
+        store.add_documents(["second"], np.array([[0.0, 1.0]], dtype=np.float32), ["second"])
+    assert pointer.value == previous
+    assert [item["document_id"] for item in store.metadata] == ["first"]
+    reloaded = FAISSVectorStore(str(tmp_path), atomic=True, pointer_store=pointer)
+    assert [item["document_id"] for item in reloaded.metadata] == ["first"]
+
+
 def test_vector_store_dimension_mismatch_can_reset(embedding_service):
     with tempfile.TemporaryDirectory() as tmp:
         store = FAISSVectorStore(index_path=tmp)

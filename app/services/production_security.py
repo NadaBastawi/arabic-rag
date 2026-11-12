@@ -6,9 +6,11 @@ import binascii
 import hashlib
 import json
 import os
+import re
+import time
 import uuid
-from contextlib import contextmanager
 from pathlib import Path
+from threading import Event, Thread
 
 from fastapi import HTTPException, Request
 
@@ -37,6 +39,11 @@ def validate_production_config(config) -> Path:
         users = [_uuid(item.strip()) for item in os.environ["DALIL_ALLOWED_USER_IDS"].split(",") if item.strip()]
         if not users:
             raise ValueError("empty allowlist")
+        if not os.environ["DALIL_STORAGE_CONNECTION_STRING"]:
+            raise ValueError("missing storage credential")
+        container = os.environ["DALIL_CONTROL_CONTAINER"]
+        if not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{1,61}[a-z0-9])", container) or "--" in container:
+            raise ValueError("invalid control container")
         host = os.environ["WEBSITE_HOSTNAME"]
         if not host or "/" in host or ":" in host:
             raise ValueError("invalid hostname")
@@ -88,16 +95,77 @@ def validate_browser_write(request: Request) -> None:
         raise HTTPException(status_code=403, detail="Invalid request origin")
 
 
-@contextmanager
-def single_writer(root: Path):
-    """Hold an OS lock on the mounted share for the process lifetime."""
-    import fcntl
-    with (root / ".dalil-writer.lock").open("a+b") as handle:
+class AzureIndexLease:
+    """A renewable, service-enforced lease on the index generation pointer."""
+    def __init__(self):
+        self._stop = Event()
+        self._lost = Event()
+        self._thread = None
+        self._blob = None
+        self._lease = None
+
+    @property
+    def healthy(self) -> bool:
+        return self._lease is not None and not self._lost.is_set()
+
+    def __enter__(self):
+        from azure.core.exceptions import HttpResponseError, ResourceExistsError
+        from azure.storage.blob import BlobClient
         try:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            raise RuntimeError("Another DALIL instance holds the data lock") from exc
+            self._blob = BlobClient.from_connection_string(
+                os.environ["DALIL_STORAGE_CONNECTION_STRING"],
+                container_name=os.environ["DALIL_CONTROL_CONTAINER"], blob_name="CURRENT",
+                retry_total=0, connection_timeout=5, read_timeout=5,
+            )
+            if not self._blob.exists():
+                try:
+                    self._blob.upload_blob(b"", overwrite=False)
+                except ResourceExistsError:
+                    pass
+            deadline = time.monotonic() + 75
+            while True:
+                try:
+                    self._lease = self._blob.acquire_lease(lease_duration=60)
+                    break
+                except HttpResponseError as exc:
+                    if exc.status_code != 409 or time.monotonic() >= deadline:
+                        raise
+                    time.sleep(3)
+        except Exception as exc:
+            raise RuntimeError("Unable to acquire the Azure index lease") from exc
+        self._thread = Thread(target=self._renew, name="dalil-index-lease", daemon=True)
+        self._thread.start()
+        return self
+
+    def _renew(self):
+        while not self._stop.wait(20):
+            try:
+                self._lease.renew()
+            except Exception:
+                self._lost.set()
+                return
+
+    def read(self) -> str:
+        return self._blob.download_blob().readall().decode("ascii").strip()
+
+    def write(self, generation: str) -> None:
+        if not self.healthy:
+            raise RuntimeError("Azure index lease is unavailable")
         try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            # Azure rejects the write if the lease has expired or changed.
+            self._blob.upload_blob((generation + "\n").encode("ascii"), overwrite=True, lease=self._lease)
+        except Exception as exc:
+            self._lost.set()
+            raise RuntimeError("Azure rejected the index commit") from exc
+
+    def __exit__(self, exc_type, exc, tb):
+        self._stop.set()
+        if self._thread:
+            self._thread.join(timeout=15)
+        try:
+            if self._lease:
+                self._lease.release()
+        except Exception:
+            # A fixed lease expires shortly after an ungraceful shutdown.
+            pass
+        self._lost.set()

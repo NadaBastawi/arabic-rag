@@ -58,9 +58,11 @@ class FAISSVectorStore:
         schema_version: int = 1,
         embedding_revision: Optional[str] = None,
         atomic: bool = False,
+        pointer_store=None,
     ):
         self.index_path = index_path
         self.atomic = atomic or os.path.exists(os.path.join(index_path, "CURRENT"))
+        self.pointer_store = pointer_store
         self._write_lock = RLock()
         self._set_paths(index_path)
         self.embedding_model = embedding_model
@@ -89,11 +91,17 @@ class FAISSVectorStore:
 
     def _select_generation(self) -> None:
         pointer = os.path.join(self.index_path, "CURRENT")
-        if not self.atomic or not os.path.exists(pointer):
+        if self.pointer_store is not None:
+            generation = self.pointer_store.read()
+            if not generation:
+                self._set_paths(self.index_path)
+                return
+        elif not self.atomic or not os.path.exists(pointer):
             self._set_paths(self.index_path)
             return
-        with open(pointer, encoding="ascii") as f:
-            generation = f.read().strip()
+        else:
+            with open(pointer, encoding="ascii") as f:
+                generation = f.read().strip()
         if not re.fullmatch(r"[0-9a-f]{32}", generation):
             raise RuntimeError("Invalid index generation pointer")
         directory = os.path.join(self.index_path, "generations", generation)
@@ -404,6 +412,9 @@ class FAISSVectorStore:
                     os.fsync(f.fileno())
         sync_directory(directory)
         sync_directory(os.path.dirname(directory))
+        if self.pointer_store is not None:
+            self.pointer_store.write(generation)
+            return
         temporary = os.path.join(self.index_path, f".CURRENT-{generation}")
         with open(temporary, "x", encoding="ascii") as f:
             f.write(generation + "\n")

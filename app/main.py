@@ -31,7 +31,7 @@ from app.services.embedding_service import EmbeddingService
 from app.services.faiss_store import FAISSVectorStore, sync_directory
 from app.services.llm_service import LLMService
 from app.services.production_security import (
-    single_writer, validate_browser_write, validate_production_config, workspace_for_request,
+    AzureIndexLease, validate_browser_write, validate_production_config, workspace_for_request,
 )
 from app.services.rag_pipeline import RAGPipeline
 from app.utils.document_loader import DocumentLoader
@@ -44,6 +44,7 @@ llm_service: Optional[LLMService] = None
 vector_store: Optional[FAISSVectorStore] = None
 rag_pipeline: Optional[RAGPipeline] = None
 document_loader: Optional[DocumentLoader] = None
+production_pointer: Optional[AzureIndexLease] = None
 
 security = HTTPBearer(auto_error=False)
 ALLOWED_EXTENSIONS = {".pdf", ".docx", ".txt"}
@@ -99,6 +100,7 @@ def _services() -> tuple[EmbeddingService, LLMService, FAISSVectorStore, RAGPipe
             schema_version=config.INDEX_SCHEMA_VERSION,
             embedding_revision=config.effective_embedding_revision,
             atomic=config.is_production,
+            pointer_store=production_pointer if config.is_production else None,
         )
         vector_store.ensure_embedding_dimension(
             embedding_service.get_embedding_dimension(), reset_on_mismatch=False
@@ -135,6 +137,8 @@ def _current_workspace(
     if config.is_production:
         if config.LOCAL_DEV_MODE or config.PRIVATE_DEV_MODE or os.getenv("WEBSITE_AUTH_ENABLED", "").lower() != "true":
             raise HTTPException(status_code=503, detail="Production authentication is not configured")
+        if production_pointer is None or not production_pointer.healthy:
+            raise HTTPException(status_code=503, detail="Production storage lease is unavailable")
         validate_browser_write(request)
         return workspace_for_request(request)
     if not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", config.AUTH_WORKSPACE_ID):
@@ -188,12 +192,14 @@ def _registry(workspace_id: str) -> dict[str, DocumentInfo]:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global production_pointer
     logger.info("Starting Arabic RAG API")
     if config.is_production:
-        mount = validate_production_config(config)
-        with single_writer(mount):
+        validate_production_config(config)
+        with AzureIndexLease() as production_pointer:
             get_services()
             yield
+        production_pointer = None
         logger.info("Shutting down Arabic RAG API")
         return
     get_services()

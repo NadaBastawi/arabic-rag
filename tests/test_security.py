@@ -159,6 +159,8 @@ def test_production_configuration_fails_closed(monkeypatch, tmp_path):
     monkeypatch.setenv("DALIL_TENANT_ID", "11111111-1111-4111-8111-111111111111")
     monkeypatch.setenv("DALIL_ALLOWED_USER_IDS", "22222222-2222-4222-8222-222222222222")
     monkeypatch.setenv("DALIL_DATA_MOUNT", str(tmp_path))
+    monkeypatch.setenv("DALIL_STORAGE_CONNECTION_STRING", "test-only")
+    monkeypatch.setenv("DALIL_CONTROL_CONTAINER", "dalil-control")
     monkeypatch.setattr("app.services.production_security.os.path.ismount", lambda _: True)
     auth = {"platform": {"enabled": True}, "globalValidation": {"requireAuthentication": True,
         "unauthenticatedClientAction": "RedirectToLoginPage", "excludedPaths": []},
@@ -177,18 +179,16 @@ def test_production_configuration_fails_closed(monkeypatch, tmp_path):
         validate_production_config(main.config)
 
 
-def test_single_writer_excludes_another_process(tmp_path):
-    import os
-    import subprocess
-    import sys
-    if os.name == "nt":
-        pytest.skip("Azure App Service pilot uses Linux file locks")
-    from app.services.production_security import single_writer
-    code = ("from pathlib import Path; from app.services.production_security import single_writer; "
-            "import sys; lock=single_writer(Path(sys.argv[1])); lock.__enter__()")
-    with single_writer(tmp_path):
-        attempted = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True)
-        assert attempted.returncode != 0
-        assert "Another DALIL instance holds the data lock" in attempted.stderr
-    released = subprocess.run([sys.executable, "-c", code, str(tmp_path)], capture_output=True, text=True)
-    assert released.returncode == 0
+def test_lease_loss_blocks_subsequent_index_commits():
+    from app.services.production_security import AzureIndexLease
+    class RejectedBlob:
+        def upload_blob(self, *args, **kwargs):
+            raise RuntimeError("lease expired")
+    lease = AzureIndexLease()
+    lease._blob = RejectedBlob()
+    lease._lease = object()
+    with pytest.raises(RuntimeError, match="rejected"):
+        lease.write("a" * 32)
+    assert not lease.healthy
+    with pytest.raises(RuntimeError, match="unavailable"):
+        lease.write("b" * 32)
